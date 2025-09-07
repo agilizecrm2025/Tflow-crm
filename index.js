@@ -13,13 +13,22 @@ app.use(express.json());
 
 // Função para mapear o evento do CRM para o evento do Facebook
 const mapCRMEventToFacebookEvent = (crmEvent) => {
+    // Mapeia eventos do CRM para nomes de eventos do Facebook
     switch (crmEvent.toUpperCase()) {
+        case 'NOVO':
+            return 'Lead';
+        case 'ATENDEU':
+            return 'Atendeu';
         case 'OPORTUNIDADE':
-            return 'Em análise';
+            return 'Oportunidade';
+        case 'AVANÇADO':
+            return 'Avançado';
         case 'VÍDEO':
-            return 'Qualificado';
+            return 'Vídeo';
         case 'VENCEMOS':
-            return 'Convertido';
+            return 'Vencemos';
+        case 'QUER EMPREGO':
+            return 'Desqualificado';
         default:
             return crmEvent;
     }
