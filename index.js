@@ -15,7 +15,7 @@ app.use(express.json());
 const mapCRMEventToFacebookEvent = (crmEvent) => {
     // Mapeia eventos do CRM para nomes de eventos do Facebook
     switch (crmEvent.toUpperCase()) {
-        case 'NOVO':
+        case 'NOVOS':
             return 'Lead';
         case 'ATENDEU':
             return 'Atendeu';
