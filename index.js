@@ -8,8 +8,8 @@ const crypto = require('crypto');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Middleware para entender dados JSON nas requisições
-app.use(express.json());
+// Middleware para entender dados JSON, com limite aumentado para 50mb
+app.use(express.json({ limit: '50mb' }));
 
 // Função para mapear o evento do CRM para o evento do Facebook
 const mapCRMEventToFacebookEvent = (crmEvent) => {
