@@ -198,7 +198,7 @@ app.post('/webhook', async (req, res) => {
         if (dbRow.zip_code) userData.zp = [crypto.createHash('sha256').update(String(dbRow.zip_code).replace(/\D/g, '')).digest('hex')];
 
         const eventData = { event_name: facebookEventName, event_time: Math.floor(Date.now() / 1000), action_source: 'system_generated', user_data: userData, custom_data: { lead_id: dbRow.facebook_lead_id } };
-        const facebookAPIUrl = `https://graph.facebook.com/v19.0/${PIXEL_ID}/events?access_token=${FB_ACCESS_TOKEN}`;
+        const facebookAPIUrl = `https://graph.facebook.com/v24.0/${PIXEL_ID}/events?access_token=${FB_ACCESS_TOKEN}`;
         
         console.log(`Enviando evento '${facebookEventName}' para a API do Facebook...`);
         await axios.post(facebookAPIUrl, { data: [eventData] });
