@@ -68,7 +68,6 @@ const initializeDatabase = async () => {
         await client.query(createTableQuery);
         console.log('Tabela "leads" principal verificada/criada com sucesso.');
 
-        // Verifica e adiciona cada coluna individualmente para garantir compatibilidade
         const allColumns = {
             'created_time': 'BIGINT', 'email': 'TEXT', 'phone': 'TEXT', 'first_name': 'TEXT', 'last_name': 'TEXT',
             'dob': 'TEXT', 'city': 'TEXT', 'estado': 'TEXT', 'zip_code': 'TEXT', 'ad_id': 'TEXT', 'ad_name': 'TEXT',
@@ -93,7 +92,7 @@ const initializeDatabase = async () => {
 
 initializeDatabase();
 
-// ROTA DE IMPORTAÇÃO (GET) - Para criar a página HTML
+// ROTA DE IMPORTAÇÃO (GET)
 app.get('/importar', (req, res) => {
     res.send(`
         <!DOCTYPE html>
@@ -128,7 +127,7 @@ app.get('/importar', (req, res) => {
     `);
 });
 
-// ROTA DE IMPORTAÇÃO (POST) - Para processar os dados
+// ROTA DE IMPORTAÇÃO (POST)
 app.post('/import-leads', async (req, res) => {
     const leadsToImport = req.body;
     if (!Array.isArray(leadsToImport)) { return res.status(400).send('Formato inválido.'); }
@@ -150,46 +149,4 @@ app.post('/import-leads', async (req, res) => {
         `;
         for (const lead of leadsToImport) {
             if (!lead || !lead.id) continue;
-            const createdTimestamp = lead.created_time ? Math.floor(new Date(lead.created_time).getTime() / 1000) : null;
-            await client.query(queryText, [
-                lead.id, createdTimestamp, lead.email, (lead.phone_number || '').replace(/\D/g, ''),
-                lead.nome, lead.sobrenome, lead.data_de_nascimento, lead.city,
-                lead.state, lead.cep, lead.ad_id, lead.ad_name, lead.adset_id,
-                lead.adset_name, lead.campaign_id, lead.campaign_name, lead.form_id,
-                lead.form_name, lead.platform, lead.is_organic, lead.lead_status
-            ]);
-        }
-        await client.query('COMMIT');
-        res.status(201).send('Leads importados com sucesso!');
-    } catch (error) {
-        await client.query('ROLLBACK');
-        console.error('Erro ao importar leads:', error.message);
-        res.status(500).send('Erro interno do servidor.');
-    } finally {
-        client.release();
-    }
-});
-
-// ENDPOINT DO WEBHOOK
-app.post('/webhook', async (req, res) => {
-    // Esta é a mesma lógica do outro projeto. Adapte se necessário.
-    console.log("--- Webhook recebido ---");
-    try {
-        // Lógica do webhook aqui...
-        res.status(200).send("Webhook recebido, lógica a ser implementada.");
-    } catch (error) {
-        console.error('Erro ao processar o webhook:', error.message);
-        res.status(500).send('Erro interno do servidor.');
-    }
-});
-
-// ROTA DE TESTE E HEALTH CHECK
-app.get('/', (req, res) => {
-  console.log("A rota principal (GET /) foi acessada com sucesso!");
-  res.status(200).send("Servidor no ar e respondendo.");
-});
-
-// Inicia o servidor
-app.listen(port, () => {
-    console.log(`Servidor rodando na porta ${port}`);
-});
+            const createdTimestamp = lead.created_time ? Math.floor(new Date(lead.created_time).getTime() /
