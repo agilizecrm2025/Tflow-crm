@@ -1,5 +1,5 @@
 // ============================================================================
-// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.4 - CORREÇÃO VALUE 0)
+// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.5 - CORREÇÃO DE DATAS)
 // ============================================================================
 
 const express = require('express');
@@ -114,7 +114,6 @@ app.post('/capture-site-data', async (req, res) => {
         console.log(' ');
         console.log('🚀 [SITE] DADO RECEBIDO');
         console.log(`   🆔 ID Sessão: ${data.custom_id}`);
-        console.log(`   👤 ${data.name || '-'} | 💻 IP: ${ip}`);
 
         const webLeadId = data.custom_id || `WEB-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
         const createdTime = Math.floor(Date.now() / 1000);
@@ -159,7 +158,7 @@ app.post('/capture-site-data', async (req, res) => {
 });
 
 // ============================================================================
-// 3. ROTA: WEBHOOK (CORRIGIDA: REMOVIDO VALUE/CURRENCY)
+// 3. ROTA: WEBHOOK
 // ============================================================================
 app.post('/webhook', async (req, res) => {
     console.log("--- 🔔 Webhook Recebido ---");
@@ -231,8 +230,6 @@ app.post('/webhook', async (req, res) => {
         }
 
         const eventTime = Math.floor(Date.now() / 1000);
-        
-        // PACOTE DE DADOS SEM VALUE/CURRENCY (CORREÇÃO DO AVISO DO FACEBOOK)
         const eventData = { 
             event_name: facebookEventName, 
             event_time: eventTime, 
@@ -244,7 +241,6 @@ app.post('/webhook', async (req, res) => {
                 campaign_name: dbRow.campaign_name,
                 form_name: dbRow.form_name,
                 lead_status: dbRow.lead_status
-                // Value e Currency removidos intencionalmente
             }
         };
 
@@ -297,19 +293,22 @@ app.get('/baixar-backup', async (req, res) => {
 });
 
 // ============================================================================
-// 5. ROTAS DE IMPORTAÇÃO
+// 5. ROTA DE IMPORTAÇÃO (COM CORREÇÃO DE DATA 12/15/25)
 // ============================================================================
 app.get('/importar', (req, res) => {
     res.send(`
         <!DOCTYPE html><html><head><title>Importar Leads</title><style>body{font-family:sans-serif;text-align:center;margin-top:50px}textarea{width:90%;max-width:1200px;height:400px;margin-top:20px}button{padding:10px 20px;font-size:16px;cursor:pointer}</style></head>
-        <body><h1>Importar Leads</h1><p>Cole o JSON.</p>
-        <textarea id="leads-data"></textarea><br><button onclick="importLeads()">Importar</button><p id="status-message"></p>
+        <body><h1>Importar Leads</h1><p>Cole o JSON com colchetes: <b>[</b> { ... }, { ... } <b>]</b></p>
+        <textarea id="leads-data" placeholder='[{"id": "...", "created_time": "12/15/25", ...}]'></textarea><br><button onclick="importLeads()">Importar</button><p id="status-message"></p>
         <script>
             async function importLeads(){
                 const d=document.getElementById('leads-data').value;
                 const s=document.getElementById('status-message');
                 try{const r=await fetch('/import-leads',{method:'POST',headers:{'Content-Type':'application/json'},body:d});
-                const t=await r.text();s.textContent=t;s.style.color='green'}catch(e){s.textContent='Erro: '+e.message;s.style.color='red'}
+                const t=await r.text();
+                s.textContent=t;
+                if(r.status === 201) s.style.color='green'; else s.style.color='red';
+                }catch(e){s.textContent='Erro: '+e.message;s.style.color='red'}
             }
         </script></body></html>
     `);
@@ -317,7 +316,7 @@ app.get('/importar', (req, res) => {
 
 app.post('/import-leads', async (req, res) => {
     const leadsToImport = req.body;
-    if (!Array.isArray(leadsToImport)) return res.status(400).send('Formato inválido.');
+    if (!Array.isArray(leadsToImport)) return res.status(400).send('Erro: O JSON deve começar com [ e terminar com ].');
 
     const client = await pool.connect();
     try {
@@ -336,9 +335,30 @@ app.post('/import-leads', async (req, res) => {
         for (const lead of leadsToImport) {
             const id = lead.id || lead.facebook_lead_id;
             if (!id) continue;
-            const phoneRaw = lead.phone_number || lead.phone || '';
-            const createdTimestamp = lead.created_time ? (String(lead.created_time).length > 10 ? Math.floor(new Date(lead.created_time).getTime() / 1000) : lead.created_time) : null;
+            
+            // --- CORREÇÃO DE DATA (CRÍTICO) ---
+            let createdTimestamp = null;
+            if (lead.created_time) {
+                const asString = String(lead.created_time);
+                // Se tiver barra ou traço (ex: "12/15/25"), é texto
+                if (asString.includes('/') || asString.includes('-')) {
+                     const dateObj = new Date(lead.created_time);
+                     if (!isNaN(dateObj.getTime())) {
+                         createdTimestamp = Math.floor(dateObj.getTime() / 1000);
+                     }
+                } else {
+                     // Se for apenas números, assume que é Timestamp
+                     if (asString.length > 10) {
+                        createdTimestamp = Math.floor(Number(asString) / 1000); // Milissegundos
+                     } else {
+                        createdTimestamp = Number(asString); // Segundos
+                     }
+                }
+            }
+            // ----------------------------------
 
+            const phoneRaw = lead.phone_number || lead.phone || '';
+            
             await client.query(queryText, [
                 id, createdTimestamp, lead.email, phoneRaw.replace(/\D/g, ''),
                 lead.nome || lead.first_name, lead.sobrenome || lead.last_name, lead.data_de_nascimento || lead.dob, 
@@ -349,11 +369,11 @@ app.post('/import-leads', async (req, res) => {
             ]);
         }
         await client.query('COMMIT');
-        res.status(201).send('Importação concluída!');
+        res.status(201).send('Importação concluída com sucesso!');
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Erro Import:', error.message);
-        res.status(500).send('Erro interno.');
+        res.status(500).send('ERRO TÉCNICO NO BANCO: ' + error.message);
     } finally {
         client.release();
     }
@@ -362,7 +382,7 @@ app.post('/import-leads', async (req, res) => {
 // ============================================================================
 // 6. INICIALIZAÇÃO
 // ============================================================================
-app.get('/', (req, res) => res.send('🟢 Servidor V8.4 (Value Fixed) Online!'));
+app.get('/', (req, res) => res.send('🟢 Servidor V8.5 (Date Fix) Online!'));
 
 const startServer = async () => {
     try {
