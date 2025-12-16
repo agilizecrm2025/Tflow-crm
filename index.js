@@ -1,5 +1,5 @@
 // ============================================================================
-// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.3 - BACKUP & RESTORE)
+// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.4 - CORREÇÃO VALUE 0)
 // ============================================================================
 
 const express = require('express');
@@ -101,7 +101,7 @@ const initializeDatabase = async () => {
 };
 
 // ============================================================================
-// 2. ROTA: CAPTURA DO SITE (V8.2)
+// 2. ROTA: CAPTURA DO SITE
 // ============================================================================
 app.post('/capture-site-data', async (req, res) => {
     const client = await pool.connect();
@@ -159,7 +159,7 @@ app.post('/capture-site-data', async (req, res) => {
 });
 
 // ============================================================================
-// 3. ROTA: WEBHOOK (V8.2)
+// 3. ROTA: WEBHOOK (CORRIGIDA: REMOVIDO VALUE/CURRENCY)
 // ============================================================================
 app.post('/webhook', async (req, res) => {
     console.log("--- 🔔 Webhook Recebido ---");
@@ -231,6 +231,8 @@ app.post('/webhook', async (req, res) => {
         }
 
         const eventTime = Math.floor(Date.now() / 1000);
+        
+        // PACOTE DE DADOS SEM VALUE/CURRENCY (CORREÇÃO DO AVISO DO FACEBOOK)
         const eventData = { 
             event_name: facebookEventName, 
             event_time: eventTime, 
@@ -241,9 +243,8 @@ app.post('/webhook', async (req, res) => {
                 lead_event_source: 'Greenn Sales',
                 campaign_name: dbRow.campaign_name,
                 form_name: dbRow.form_name,
-                lead_status: dbRow.lead_status,
-                currency: 'BRL',
-                value: 0
+                lead_status: dbRow.lead_status
+                // Value e Currency removidos intencionalmente
             }
         };
 
@@ -262,7 +263,7 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ============================================================================
-// 4. [NOVO] ROTA DE BACKUP CSV (DOWNLOAD)
+// 4. ROTA DE BACKUP CSV
 // ============================================================================
 app.get('/baixar-backup', async (req, res) => {
     try {
@@ -272,15 +273,13 @@ app.get('/baixar-backup', async (req, res) => {
 
         if (result.rows.length === 0) return res.send('Banco vazio.');
 
-        // Gera CSV com separação correta
         const headers = Object.keys(result.rows[0]);
         const csvRows = [];
-        csvRows.push(headers.join(',')); // Cabeçalho
+        csvRows.push(headers.join(','));
 
         for (const row of result.rows) {
             const values = headers.map(header => {
                 const val = row[header];
-                // Escapa aspas e envolve em aspas para proteger virgulas internas
                 const escaped = ('' + (val || '')).replace(/"/g, '""');
                 return `"${escaped}"`;
             });
@@ -298,12 +297,12 @@ app.get('/baixar-backup', async (req, res) => {
 });
 
 // ============================================================================
-// 5. ROTAS DE IMPORTAÇÃO (UNIVERSAL: FACEBOOK JSON + BACKUP JSON)
+// 5. ROTAS DE IMPORTAÇÃO
 // ============================================================================
 app.get('/importar', (req, res) => {
     res.send(`
         <!DOCTYPE html><html><head><title>Importar Leads</title><style>body{font-family:sans-serif;text-align:center;margin-top:50px}textarea{width:90%;max-width:1200px;height:400px;margin-top:20px}button{padding:10px 20px;font-size:16px;cursor:pointer}</style></head>
-        <body><h1>Importar Leads</h1><p>Cole o JSON do Facebook OU o JSON convertido do seu Backup.</p>
+        <body><h1>Importar Leads</h1><p>Cole o JSON.</p>
         <textarea id="leads-data"></textarea><br><button onclick="importLeads()">Importar</button><p id="status-message"></p>
         <script>
             async function importLeads(){
@@ -335,10 +334,8 @@ app.post('/import-leads', async (req, res) => {
         `;
         
         for (const lead of leadsToImport) {
-            // LÓGICA UNIVERSAL: Aceita 'id' (Facebook) OU 'facebook_lead_id' (Backup)
             const id = lead.id || lead.facebook_lead_id;
             if (!id) continue;
-
             const phoneRaw = lead.phone_number || lead.phone || '';
             const createdTimestamp = lead.created_time ? (String(lead.created_time).length > 10 ? Math.floor(new Date(lead.created_time).getTime() / 1000) : lead.created_time) : null;
 
@@ -352,7 +349,7 @@ app.post('/import-leads', async (req, res) => {
             ]);
         }
         await client.query('COMMIT');
-        res.status(201).send('Importação concluída (Universal)!');
+        res.status(201).send('Importação concluída!');
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Erro Import:', error.message);
@@ -365,7 +362,7 @@ app.post('/import-leads', async (req, res) => {
 // ============================================================================
 // 6. INICIALIZAÇÃO
 // ============================================================================
-app.get('/', (req, res) => res.send('🟢 Servidor V8.3 (Backup & Restore) Online!'));
+app.get('/', (req, res) => res.send('🟢 Servidor V8.4 (Value Fixed) Online!'));
 
 const startServer = async () => {
     try {
