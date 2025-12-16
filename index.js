@@ -1,5 +1,5 @@
 // ============================================================================
-// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.2 - FINAL GOLD)
+// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.3 - BACKUP & RESTORE)
 // ============================================================================
 
 const express = require('express');
@@ -10,25 +10,18 @@ const cors = require('cors');
 
 const app = express();
 
-// Habilita CORS para aceitar dados vindos do seu site
 app.use(cors());
-
-// Define a porta
 const port = process.env.PORT || 10000;
-
-// Aumenta o limite de dados para aceitar importações grandes
 app.use(express.json({ limit: '50mb' }));
 
-// Função de Espera (Sleep) para a lógica de "Retry"
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ============================================================================
-// 1. CONFIGURAÇÕES: MAPEAMENTO DE EVENTOS (PERSONALIZADO)
+// 1. CONFIGURAÇÕES
 // ============================================================================
 
 const mapCRMEventToFacebookEvent = (crmEvent) => {
     if (!crmEvent) return 'Lead'; 
-    // Mantendo os nomes exatos que você usa no Gestor de Eventos
     switch (crmEvent.toUpperCase()) {
         case 'NOVOS': return 'Lead';
         case 'ATENDEU': return 'Atendeu';
@@ -42,10 +35,6 @@ const mapCRMEventToFacebookEvent = (crmEvent) => {
     }
 };
 
-// ============================================================================
-// 2. BANCO DE DADOS (POSTGRESQL)
-// ============================================================================
-
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
@@ -55,7 +44,6 @@ const initializeDatabase = async () => {
     const client = await pool.connect();
     try {
         console.log('🔄 Verificando estrutura do Banco de Dados...');
-        
         const createTableQuery = `
             CREATE TABLE IF NOT EXISTS leads (
                 facebook_lead_id TEXT PRIMARY KEY,
@@ -87,7 +75,6 @@ const initializeDatabase = async () => {
         `;
         await client.query(createTableQuery);
 
-        // Garante que todas as colunas existam (Auto-Correção)
         const allColumns = {
             'created_time': 'BIGINT', 'email': 'TEXT', 'phone': 'TEXT', 'first_name': 'TEXT', 'last_name': 'TEXT',
             'dob': 'TEXT', 'city': 'TEXT', 'estado': 'TEXT', 'zip_code': 'TEXT', 'ad_id': 'TEXT', 'ad_name': 'TEXT',
@@ -114,33 +101,26 @@ const initializeDatabase = async () => {
 };
 
 // ============================================================================
-// 3. ROTA: CAPTURA DO SITE (SCRIPT V7 + IP + USER AGENT)
+// 2. ROTA: CAPTURA DO SITE (V8.2)
 // ============================================================================
 app.post('/capture-site-data', async (req, res) => {
     const client = await pool.connect();
     try {
         const data = req.body;
-
-        // Captura o IP real (Headers do Proxy ou Conexão Direta)
         let ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
         if (ip && ip.includes(',')) ip = ip.split(',')[0].trim();
-
-        // Captura o User Agent
         const userAgent = data.agent || req.headers['user-agent'];
 
         console.log(' ');
-        console.log('🚀 [SITE] DADO RECEBIDO (V8.2)');
+        console.log('🚀 [SITE] DADO RECEBIDO');
         console.log(`   🆔 ID Sessão: ${data.custom_id}`);
         console.log(`   👤 ${data.name || '-'} | 💻 IP: ${ip}`);
 
         const webLeadId = data.custom_id || `WEB-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
         const createdTime = Math.floor(Date.now() / 1000);
-        
-        // Limpeza de Email e Telefone
         const email = data.email ? data.email.toLowerCase().trim() : null;
         const phone = data.phone ? data.phone.replace(/\D/g, '') : null;
         
-        // Separação de Nome
         let firstName = data.name || '';
         let lastName = '';
         if (firstName.includes(' ')) {
@@ -149,10 +129,9 @@ app.post('/capture-site-data', async (req, res) => {
             lastName = parts.slice(1).join(' ');
         }
 
-        // QUERY INTELIGENTE (UPSERT): Atualiza apenas o que mudou, mantém o resto.
         const queryText = `
             INSERT INTO leads (facebook_lead_id, created_time, email, phone, first_name, last_name, fbc, fbp, client_ip_address, client_user_agent, platform, is_organic, form_name)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'site_tflow', false, 'Formulario Site')
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'site_smartcred', false, 'Formulario Site')
             ON CONFLICT (facebook_lead_id) DO UPDATE SET
                 email = COALESCE(EXCLUDED.email, leads.email),
                 phone = COALESCE(EXCLUDED.phone, leads.phone),
@@ -168,7 +147,7 @@ app.post('/capture-site-data', async (req, res) => {
             webLeadId, createdTime, email, phone, firstName, lastName, data.fbc, data.fbp, ip, userAgent
         ]);
 
-        console.log('💾 [DB] Dados salvos/atualizados!');
+        console.log('💾 [DB] Salvo com sucesso!');
         res.status(200).json({ success: true });
 
     } catch (error) {
@@ -180,32 +159,27 @@ app.post('/capture-site-data', async (req, res) => {
 });
 
 // ============================================================================
-// 4. ROTA: WEBHOOK (ENVIA TUDO PARA O FACEBOOK COM HASHING CORRETO)
+// 3. ROTA: WEBHOOK (V8.2)
 // ============================================================================
 app.post('/webhook', async (req, res) => {
     console.log("--- 🔔 Webhook Recebido ---");
     try {
         const leadData = req.body;
-        
-        // Verifica Tag do Evento
         const crmEventName = leadData.tag ? leadData.tag.name : null;
         if (!crmEventName) return res.status(200).send('Sem tag.');
 
         const facebookEventName = mapCRMEventToFacebookEvent(crmEventName);
         if (!leadData.lead) return res.status(400).send('Sem dados.');
         
-        // Pega Email e Telefone
         const leadEmail = leadData.lead.email ? leadData.lead.email.toLowerCase().trim() : null;
         let leadPhone = leadData.lead.phone ? leadData.lead.phone.replace(/\D/g, '') : null;
         if (!leadEmail && !leadPhone) return res.status(400).send('Sem contatos.');
 
-        // Tratamento DDI para busca no banco
         let searchPhone = leadPhone;
         if (searchPhone && searchPhone.startsWith('55') && searchPhone.length > 11) {
             searchPhone = searchPhone.substring(2);
         }
 
-        // Lógica de Retry (Busca Inteligente - 3 Tentativas)
         let dbRow;
         let result;
         let attempts = 0;
@@ -234,7 +208,6 @@ app.post('/webhook', async (req, res) => {
 
         const userData = {};
         
-        // --- CRIPTOGRAFIA SHA256 (PII - Identificação Pessoal) ---
         if (dbRow.email) userData.em = [crypto.createHash('sha256').update(dbRow.email).digest('hex')];
         if (dbRow.phone) userData.ph = [crypto.createHash('sha256').update(dbRow.phone).digest('hex')];
         if (dbRow.first_name) userData.fn = [crypto.createHash('sha256').update(dbRow.first_name.toLowerCase()).digest('hex')];
@@ -242,22 +215,17 @@ app.post('/webhook', async (req, res) => {
         if (dbRow.city) userData.ct = [crypto.createHash('sha256').update(dbRow.city.toLowerCase()).digest('hex')];
         if (dbRow.estado) userData.st = [crypto.createHash('sha256').update(dbRow.estado.toLowerCase()).digest('hex')];
         if (dbRow.zip_code) userData.zp = [crypto.createHash('sha256').update(String(dbRow.zip_code).replace(/\D/g, '')).digest('hex')];
-        
-        // [NOVO] Data de Nascimento
         if (dbRow.dob) userData.db = [crypto.createHash('sha256').update(String(dbRow.dob).replace(/\D/g, '')).digest('hex')];
 
-        // --- DADOS DE QUALIDADE (NÃO HASHED) ---
         if (dbRow.fbc) userData.fbc = dbRow.fbc;
         if (dbRow.fbp) userData.fbp = dbRow.fbp;
-        if (dbRow.client_ip_address) userData.client_ip_address = dbRow.client_ip_address; // IP Real
-        if (dbRow.client_user_agent) userData.client_user_agent = dbRow.client_user_agent; // User Agent
+        if (dbRow.client_ip_address) userData.client_ip_address = dbRow.client_ip_address;
+        if (dbRow.client_user_agent) userData.client_user_agent = dbRow.client_user_agent;
 
-        // --- EXTERNAL ID (Deduplicação) ---
         if (dbRow.facebook_lead_id) {
             userData.external_id = [crypto.createHash('sha256').update(dbRow.facebook_lead_id).digest('hex')];
         }
 
-        // Lead ID (Apenas se vier do Facebook Nativo)
         if (dbRow.facebook_lead_id && !dbRow.facebook_lead_id.startsWith('WEB-')) {
             userData.lead_id = dbRow.facebook_lead_id;
         }
@@ -281,11 +249,10 @@ app.post('/webhook', async (req, res) => {
 
         const facebookAPIUrl = `https://graph.facebook.com/v24.0/${PIXEL_ID}/events?access_token=${FB_ACCESS_TOKEN}`;
         
-        console.log(`📤 Enviando '${facebookEventName}'... (IP: ${dbRow.client_ip_address || 'N/A'})`);
-        
+        console.log(`📤 Enviando '${facebookEventName}'...`);
         await axios.post(facebookAPIUrl, { data: [eventData] });
 
-        console.log(`✅ SUCESSO! Evento enviado.`);
+        console.log(`✅ SUCESSO!`);
         res.status(200).send('Enviado.');
 
     } catch (error) {
@@ -295,78 +262,101 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ============================================================================
-// 5. ROTAS DE IMPORTAÇÃO (INTERFACE VISUAL COMPLETA)
+// 4. [NOVO] ROTA DE BACKUP CSV (DOWNLOAD)
+// ============================================================================
+app.get('/baixar-backup', async (req, res) => {
+    try {
+        const client = await pool.connect();
+        const result = await client.query('SELECT * FROM leads');
+        client.release();
+
+        if (result.rows.length === 0) return res.send('Banco vazio.');
+
+        // Gera CSV com separação correta
+        const headers = Object.keys(result.rows[0]);
+        const csvRows = [];
+        csvRows.push(headers.join(',')); // Cabeçalho
+
+        for (const row of result.rows) {
+            const values = headers.map(header => {
+                const val = row[header];
+                // Escapa aspas e envolve em aspas para proteger virgulas internas
+                const escaped = ('' + (val || '')).replace(/"/g, '""');
+                return `"${escaped}"`;
+            });
+            csvRows.push(values.join(','));
+        }
+
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="backup_leads.csv"');
+        res.status(200).send(csvRows.join('\n'));
+
+    } catch (error) {
+        console.error('Erro CSV:', error);
+        res.status(500).send('Erro ao gerar backup.');
+    }
+});
+
+// ============================================================================
+// 5. ROTAS DE IMPORTAÇÃO (UNIVERSAL: FACEBOOK JSON + BACKUP JSON)
 // ============================================================================
 app.get('/importar', (req, res) => {
     res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Importar Leads</title>
-            <style> body { font-family: sans-serif; text-align: center; margin-top: 50px; } textarea { width: 90%; max-width: 1200px; height: 400px; margin-top: 20px; font-family: monospace; } button { padding: 10px 20px; font-size: 16px; cursor: pointer; } </style>
-        </head>
-        <body>
-            <h1>Importar Leads para o Banco de Dados</h1>
-            <p>Cole seus dados JSON aqui. Use os cabeçalhos da sua planilha (ex: id, created_time, email, etc.).</p>
-            <textarea id="leads-data" placeholder='[{"id": "123...", "created_time": "2025-10-20T10:30:00-0300", "email": "teste@email.com", ...}]'></textarea><br>
-            <button onclick="importLeads()">Importar Leads</button>
-            <p id="status-message" style="margin-top: 20px; font-weight: bold;"></p>
-            <script>
-                async function importLeads() {
-                    const data = document.getElementById('leads-data').value;
-                    const statusMessage = document.getElementById('status-message');
-                    try {
-                        const response = await fetch('/import-leads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: data });
-                        const result = await response.text();
-                        statusMessage.textContent = result;
-                        statusMessage.style.color = 'green';
-                    } catch (error) {
-                        statusMessage.textContent = 'Erro na importação: ' + error.message;
-                        statusMessage.style.color = 'red';
-                    }
-                }
-            </script>
-        </body>
-        </html>
+        <!DOCTYPE html><html><head><title>Importar Leads</title><style>body{font-family:sans-serif;text-align:center;margin-top:50px}textarea{width:90%;max-width:1200px;height:400px;margin-top:20px}button{padding:10px 20px;font-size:16px;cursor:pointer}</style></head>
+        <body><h1>Importar Leads</h1><p>Cole o JSON do Facebook OU o JSON convertido do seu Backup.</p>
+        <textarea id="leads-data"></textarea><br><button onclick="importLeads()">Importar</button><p id="status-message"></p>
+        <script>
+            async function importLeads(){
+                const d=document.getElementById('leads-data').value;
+                const s=document.getElementById('status-message');
+                try{const r=await fetch('/import-leads',{method:'POST',headers:{'Content-Type':'application/json'},body:d});
+                const t=await r.text();s.textContent=t;s.style.color='green'}catch(e){s.textContent='Erro: '+e.message;s.style.color='red'}
+            }
+        </script></body></html>
     `);
 });
 
 app.post('/import-leads', async (req, res) => {
     const leadsToImport = req.body;
-    if (!Array.isArray(leadsToImport)) { return res.status(400).send('Formato inválido.'); }
+    if (!Array.isArray(leadsToImport)) return res.status(400).send('Formato inválido.');
 
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         const queryText = `
-            INSERT INTO leads (facebook_lead_id, created_time, email, phone, first_name, last_name, dob, city, estado, zip_code, ad_id, ad_name, adset_id, adset_name, campaign_id, campaign_name, form_id, form_name, platform, is_organic, lead_status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+            INSERT INTO leads (facebook_lead_id, created_time, email, phone, first_name, last_name, dob, city, estado, zip_code, ad_id, ad_name, adset_id, adset_name, campaign_id, campaign_name, form_id, form_name, platform, is_organic, lead_status, fbc, fbp, client_ip_address, client_user_agent)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
             ON CONFLICT (facebook_lead_id) DO UPDATE SET
-                created_time = EXCLUDED.created_time, email = EXCLUDED.email, phone = EXCLUDED.phone,
-                first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name, dob = EXCLUDED.dob,
-                city = EXCLUDED.city, estado = EXCLUDED.estado, zip_code = EXCLUDED.zip_code,
-                ad_id = EXCLUDED.ad_id, ad_name = EXCLUDED.ad_name, adset_id = EXCLUDED.adset_id,
-                adset_name = EXCLUDED.adset_name, campaign_id = EXCLUDED.campaign_id, campaign_name = EXCLUDED.campaign_name,
-                form_id = EXCLUDED.form_id, form_name = EXCLUDED.form_name, platform = EXCLUDED.platform,
-                is_organic = EXCLUDED.is_organic, lead_status = EXCLUDED.lead_status;
+                email = COALESCE(EXCLUDED.email, leads.email),
+                phone = COALESCE(EXCLUDED.phone, leads.phone),
+                first_name = COALESCE(EXCLUDED.first_name, leads.first_name),
+                fbc = COALESCE(EXCLUDED.fbc, leads.fbc),
+                fbp = COALESCE(EXCLUDED.fbp, leads.fbp);
         `;
+        
         for (const lead of leadsToImport) {
-            if (!lead || !lead.id) continue;
-            const createdTimestamp = lead.created_time ? Math.floor(new Date(lead.created_time).getTime() / 1000) : null;
+            // LÓGICA UNIVERSAL: Aceita 'id' (Facebook) OU 'facebook_lead_id' (Backup)
+            const id = lead.id || lead.facebook_lead_id;
+            if (!id) continue;
+
+            const phoneRaw = lead.phone_number || lead.phone || '';
+            const createdTimestamp = lead.created_time ? (String(lead.created_time).length > 10 ? Math.floor(new Date(lead.created_time).getTime() / 1000) : lead.created_time) : null;
+
             await client.query(queryText, [
-                lead.id, createdTimestamp, lead.email, (lead.phone_number || '').replace(/\D/g, ''),
-                lead.nome, lead.sobrenome, lead.data_de_nascimento, lead.city,
-                lead.state, lead.cep, lead.ad_id, lead.ad_name, lead.adset_id,
-                lead.adset_name, lead.campaign_id, lead.campaign_name, lead.form_id,
-                lead.form_name, lead.platform, lead.is_organic, lead.lead_status
+                id, createdTimestamp, lead.email, phoneRaw.replace(/\D/g, ''),
+                lead.nome || lead.first_name, lead.sobrenome || lead.last_name, lead.data_de_nascimento || lead.dob, 
+                lead.city, lead.state || lead.estado, lead.cep || lead.zip_code, 
+                lead.ad_id, lead.ad_name, lead.adset_id, lead.adset_name, lead.campaign_id, lead.campaign_name, 
+                lead.form_id, lead.form_name, lead.platform, lead.is_organic, lead.lead_status,
+                lead.fbc, lead.fbp, lead.client_ip_address, lead.client_user_agent
             ]);
         }
         await client.query('COMMIT');
-        res.status(201).send('Leads importados com sucesso!');
+        res.status(201).send('Importação concluída (Universal)!');
     } catch (error) {
         await client.query('ROLLBACK');
-        console.error('Erro ao importar leads:', error.message);
-        res.status(500).send('Erro interno do servidor.');
+        console.error('Erro Import:', error.message);
+        res.status(500).send('Erro interno.');
     } finally {
         client.release();
     }
@@ -375,14 +365,14 @@ app.post('/import-leads', async (req, res) => {
 // ============================================================================
 // 6. INICIALIZAÇÃO
 // ============================================================================
-app.get('/', (req, res) => res.send('🟢 Servidor V8.2 (Final Gold) Online!'));
+app.get('/', (req, res) => res.send('🟢 Servidor V8.3 (Backup & Restore) Online!'));
 
 const startServer = async () => {
     try {
         await initializeDatabase();
-        app.listen(port, () => console.log(`🚀 Servidor rodando na porta ${port}`));
+        app.listen(port, () => console.log(`🚀 Servidor na porta ${port}`));
     } catch (error) {
-        console.error("❌ Falha fatal ao iniciar:", error);
+        console.error("❌ Falha:", error);
     }
 };
 
