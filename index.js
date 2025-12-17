@@ -1,5 +1,5 @@
 // ============================================================================
-// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.5 - CORREÇÃO DE DATAS)
+// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.9 - PROTEÇÃO 3 MINUTOS)
 // ============================================================================
 
 const express = require('express');
@@ -17,7 +17,7 @@ app.use(express.json({ limit: '50mb' }));
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ============================================================================
-// 1. CONFIGURAÇÕES
+// 1. CONFIGURAÇÕES E MAPA DE EVENTOS
 // ============================================================================
 
 const mapCRMEventToFacebookEvent = (crmEvent) => {
@@ -158,7 +158,7 @@ app.post('/capture-site-data', async (req, res) => {
 });
 
 // ============================================================================
-// 3. ROTA: WEBHOOK
+// 3. ROTA: WEBHOOK (CRM -> FACEBOOK)
 // ============================================================================
 app.post('/webhook', async (req, res) => {
     console.log("--- 🔔 Webhook Recebido ---");
@@ -189,7 +189,7 @@ app.post('/webhook', async (req, res) => {
             result = await pool.query(searchQuery, [leadEmail, searchPhone]);
             if (result.rows.length > 0) {
                 dbRow = result.rows[0];
-                console.log(`✅ Lead encontrado (Tentativa ${attempts})`);
+                console.log(`✅ Lead encontrado no DB (Tentativa ${attempts})`);
                 break; 
             } else {
                 if (attempts < 3) await sleep(3000);
@@ -197,16 +197,33 @@ app.post('/webhook', async (req, res) => {
         }
 
         if (!dbRow) {
-            console.log('❌ Lead não encontrado no DB.');
+            console.log('❌ Lead não encontrado no DB. Ignorando evento CRM para evitar disparos vazios.');
             return res.status(200).send('Não encontrado.');
         }
+
+        // ====================================================================
+        // 🛡️ BLOCO DE PROTEÇÃO: FILTRO 3 MINUTOS (TURBO V8.9)
+        // ====================================================================
+        
+        const now = Math.floor(Date.now() / 1000);
+        const leadCreatedTime = dbRow.created_time || now;
+        const secondsSinceCreation = now - leadCreatedTime;
+        const minutesSinceCreation = secondsSinceCreation / 60;
+
+        // Se for evento "Lead" e o cadastro tiver mais de 3 minutos -> BLOQUEIA
+        if (facebookEventName === 'Lead' && minutesSinceCreation > 3) {
+            console.log(`🛑 [FILTRO] Evento "Lead" BLOQUEADO.`);
+            console.log(`   Motivo: O lead já existe há ${minutesSinceCreation.toFixed(1)} minutos.`);
+            console.log(`   Ação: Ignorado para não duplicar. Janela de aceite: 3 min.`);
+            return res.status(200).send('Ignorado: Lead > 3min.');
+        }
+        // ====================================================================
 
         const PIXEL_ID = process.env.PIXEL_ID;
         const FB_ACCESS_TOKEN = process.env.FB_ACCESS_TOKEN;
         if (!PIXEL_ID || !FB_ACCESS_TOKEN) return res.status(500).send('Erro Config.');
 
         const userData = {};
-        
         if (dbRow.email) userData.em = [crypto.createHash('sha256').update(dbRow.email).digest('hex')];
         if (dbRow.phone) userData.ph = [crypto.createHash('sha256').update(dbRow.phone).digest('hex')];
         if (dbRow.first_name) userData.fn = [crypto.createHash('sha256').update(dbRow.first_name.toLowerCase()).digest('hex')];
@@ -293,7 +310,7 @@ app.get('/baixar-backup', async (req, res) => {
 });
 
 // ============================================================================
-// 5. ROTA DE IMPORTAÇÃO (COM CORREÇÃO DE DATA 12/15/25)
+// 5. ROTA DE IMPORTAÇÃO (COM TRATAMENTO COMPLETO)
 // ============================================================================
 app.get('/importar', (req, res) => {
     res.send(`
@@ -336,26 +353,23 @@ app.post('/import-leads', async (req, res) => {
             const id = lead.id || lead.facebook_lead_id;
             if (!id) continue;
             
-            // --- CORREÇÃO DE DATA (CRÍTICO) ---
+            // TRATAMENTO: Data
             let createdTimestamp = null;
             if (lead.created_time) {
                 const asString = String(lead.created_time);
-                // Se tiver barra ou traço (ex: "12/15/25"), é texto
                 if (asString.includes('/') || asString.includes('-')) {
                      const dateObj = new Date(lead.created_time);
-                     if (!isNaN(dateObj.getTime())) {
-                         createdTimestamp = Math.floor(dateObj.getTime() / 1000);
-                     }
+                     if (!isNaN(dateObj.getTime())) createdTimestamp = Math.floor(dateObj.getTime() / 1000);
                 } else {
-                     // Se for apenas números, assume que é Timestamp
-                     if (asString.length > 10) {
-                        createdTimestamp = Math.floor(Number(asString) / 1000); // Milissegundos
-                     } else {
-                        createdTimestamp = Number(asString); // Segundos
-                     }
+                     createdTimestamp = (asString.length > 10) ? Math.floor(Number(asString) / 1000) : Number(asString);
                 }
             }
-            // ----------------------------------
+
+            // TRATAMENTO: Boolean (is_organic)
+            let isOrganic = false;
+            if (lead.is_organic === true || String(lead.is_organic).toLowerCase() === 'true') {
+                isOrganic = true;
+            }
 
             const phoneRaw = lead.phone_number || lead.phone || '';
             
@@ -364,7 +378,7 @@ app.post('/import-leads', async (req, res) => {
                 lead.nome || lead.first_name, lead.sobrenome || lead.last_name, lead.data_de_nascimento || lead.dob, 
                 lead.city, lead.state || lead.estado, lead.cep || lead.zip_code, 
                 lead.ad_id, lead.ad_name, lead.adset_id, lead.adset_name, lead.campaign_id, lead.campaign_name, 
-                lead.form_id, lead.form_name, lead.platform, lead.is_organic, lead.lead_status,
+                lead.form_id, lead.form_name, lead.platform, isOrganic, lead.lead_status,
                 lead.fbc, lead.fbp, lead.client_ip_address, lead.client_user_agent
             ]);
         }
@@ -382,7 +396,7 @@ app.post('/import-leads', async (req, res) => {
 // ============================================================================
 // 6. INICIALIZAÇÃO
 // ============================================================================
-app.get('/', (req, res) => res.send('🟢 Servidor V8.5 (Date Fix) Online!'));
+app.get('/', (req, res) => res.send('🟢 Servidor V8.9 (3-Min Protection) Online!'));
 
 const startServer = async () => {
     try {
