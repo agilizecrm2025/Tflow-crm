@@ -1,5 +1,5 @@
 // ============================================================================
-// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.10 - DEDUPLICAÇÃO TOTAL)
+// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.11 - PROTEÇÃO HÍBRIDA)
 // ============================================================================
 
 const express = require('express');
@@ -202,8 +202,7 @@ app.post('/webhook', async (req, res) => {
         }
 
         // ====================================================================
-        // 🛡️ BLOCO DE PROTEÇÃO 1: FILTRO DE TEMPO (3 MINUTOS)
-        // Bloqueia movimentações antigas do CRM
+        // 🛡️ BLOCO DE PROTEÇÃO HÍBRIDO (SITE vs NATIVO) - V8.11
         // ====================================================================
         
         const now = Math.floor(Date.now() / 1000);
@@ -211,10 +210,15 @@ app.post('/webhook', async (req, res) => {
         const secondsSinceCreation = now - leadCreatedTime;
         const minutesSinceCreation = secondsSinceCreation / 60;
 
-        if (facebookEventName === 'Lead' && minutesSinceCreation > 3) {
+        // Verifica se é um lead do SITE (ID começa com WEB-)
+        const isSiteLead = dbRow.facebook_lead_id && String(dbRow.facebook_lead_id).startsWith('WEB-');
+
+        // A REGRA DOS 3 MINUTOS SÓ SE APLICA PARA LEADS DO SITE!
+        // Se for Nativo (importado depois), a gente deixa passar sempre.
+        if (facebookEventName === 'Lead' && isSiteLead && minutesSinceCreation > 3) {
             console.log(`🛑 [FILTRO] Evento "Lead" BLOQUEADO (Tempo).`);
-            console.log(`   Motivo: O lead já existe há ${minutesSinceCreation.toFixed(1)} minutos.`);
-            return res.status(200).send('Ignorado: Lead > 3min.');
+            console.log(`   Tipo: SITE | Idade: ${minutesSinceCreation.toFixed(1)} min.`);
+            return res.status(200).send('Ignorado: Site Lead Antigo.');
         }
 
         // ====================================================================
@@ -248,16 +252,10 @@ app.post('/webhook', async (req, res) => {
 
         const eventTime = Math.floor(Date.now() / 1000);
         
-        // ====================================================================
-        // 🛡️ BLOCO DE PROTEÇÃO 2: DEDUPLICAÇÃO NATIVA (EVENT_ID)
-        // Se o mesmo ID for enviado 2x, o Facebook descarta o segundo.
-        // ====================================================================
-        
+        // Mantemos o event_id para deduplicação nativa
         const eventData = { 
             event_name: facebookEventName, 
             event_time: eventTime,
-            // AQUI ESTÁ A MÁGICA: Usamos o ID do Lead como ID do Evento
-            // Assim, se enviar o mesmo lead duas vezes, o FB bloqueia a cópia.
             event_id: dbRow.facebook_lead_id, 
             action_source: 'website',
             user_data: userData,
@@ -405,7 +403,7 @@ app.post('/import-leads', async (req, res) => {
 // ============================================================================
 // 6. INICIALIZAÇÃO
 // ============================================================================
-app.get('/', (req, res) => res.send('🟢 Servidor V8.10 (Deduplicação Total) Online!'));
+app.get('/', (req, res) => res.send('🟢 Servidor V8.11 (Proteção Híbrida) Online!'));
 
 const startServer = async () => {
     try {
