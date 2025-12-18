@@ -1,5 +1,5 @@
 // ============================================================================
-// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.9 - PROTEÇÃO 3 MINUTOS)
+// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.10 - DEDUPLICAÇÃO TOTAL)
 // ============================================================================
 
 const express = require('express');
@@ -202,7 +202,8 @@ app.post('/webhook', async (req, res) => {
         }
 
         // ====================================================================
-        // 🛡️ BLOCO DE PROTEÇÃO: FILTRO 3 MINUTOS (TURBO V8.9)
+        // 🛡️ BLOCO DE PROTEÇÃO 1: FILTRO DE TEMPO (3 MINUTOS)
+        // Bloqueia movimentações antigas do CRM
         // ====================================================================
         
         const now = Math.floor(Date.now() / 1000);
@@ -210,13 +211,12 @@ app.post('/webhook', async (req, res) => {
         const secondsSinceCreation = now - leadCreatedTime;
         const minutesSinceCreation = secondsSinceCreation / 60;
 
-        // Se for evento "Lead" e o cadastro tiver mais de 3 minutos -> BLOQUEIA
         if (facebookEventName === 'Lead' && minutesSinceCreation > 3) {
-            console.log(`🛑 [FILTRO] Evento "Lead" BLOQUEADO.`);
+            console.log(`🛑 [FILTRO] Evento "Lead" BLOQUEADO (Tempo).`);
             console.log(`   Motivo: O lead já existe há ${minutesSinceCreation.toFixed(1)} minutos.`);
-            console.log(`   Ação: Ignorado para não duplicar. Janela de aceite: 3 min.`);
             return res.status(200).send('Ignorado: Lead > 3min.');
         }
+
         // ====================================================================
 
         const PIXEL_ID = process.env.PIXEL_ID;
@@ -247,9 +247,18 @@ app.post('/webhook', async (req, res) => {
         }
 
         const eventTime = Math.floor(Date.now() / 1000);
+        
+        // ====================================================================
+        // 🛡️ BLOCO DE PROTEÇÃO 2: DEDUPLICAÇÃO NATIVA (EVENT_ID)
+        // Se o mesmo ID for enviado 2x, o Facebook descarta o segundo.
+        // ====================================================================
+        
         const eventData = { 
             event_name: facebookEventName, 
-            event_time: eventTime, 
+            event_time: eventTime,
+            // AQUI ESTÁ A MÁGICA: Usamos o ID do Lead como ID do Evento
+            // Assim, se enviar o mesmo lead duas vezes, o FB bloqueia a cópia.
+            event_id: dbRow.facebook_lead_id, 
             action_source: 'website',
             user_data: userData,
             custom_data: { 
@@ -263,7 +272,7 @@ app.post('/webhook', async (req, res) => {
 
         const facebookAPIUrl = `https://graph.facebook.com/v24.0/${PIXEL_ID}/events?access_token=${FB_ACCESS_TOKEN}`;
         
-        console.log(`📤 Enviando '${facebookEventName}'...`);
+        console.log(`📤 Enviando '${facebookEventName}' (ID: ${dbRow.facebook_lead_id})...`);
         await axios.post(facebookAPIUrl, { data: [eventData] });
 
         console.log(`✅ SUCESSO!`);
@@ -310,7 +319,7 @@ app.get('/baixar-backup', async (req, res) => {
 });
 
 // ============================================================================
-// 5. ROTA DE IMPORTAÇÃO (COM TRATAMENTO COMPLETO)
+// 5. ROTA DE IMPORTAÇÃO
 // ============================================================================
 app.get('/importar', (req, res) => {
     res.send(`
@@ -396,7 +405,7 @@ app.post('/import-leads', async (req, res) => {
 // ============================================================================
 // 6. INICIALIZAÇÃO
 // ============================================================================
-app.get('/', (req, res) => res.send('🟢 Servidor V8.9 (3-Min Protection) Online!'));
+app.get('/', (req, res) => res.send('🟢 Servidor V8.10 (Deduplicação Total) Online!'));
 
 const startServer = async () => {
     try {
