@@ -1,5 +1,5 @@
 // ============================================================================
-// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.11 - PROTEÇÃO HÍBRIDA)
+// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.15 - ANTI-FLOOD SITE + SUPORTE NATIVO)
 // ============================================================================
 
 const express = require('express');
@@ -101,7 +101,7 @@ const initializeDatabase = async () => {
 };
 
 // ============================================================================
-// 2. ROTA: CAPTURA DO SITE
+// 2. ROTA: CAPTURA DO SITE (ANTI-FLOOD / VÍCIO DE CLIQUE)
 // ============================================================================
 app.post('/capture-site-data', async (req, res) => {
     const client = await pool.connect();
@@ -110,13 +110,6 @@ app.post('/capture-site-data', async (req, res) => {
         let ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
         if (ip && ip.includes(',')) ip = ip.split(',')[0].trim();
         const userAgent = data.agent || req.headers['user-agent'];
-
-        console.log(' ');
-        console.log('🚀 [SITE] DADO RECEBIDO');
-        console.log(`   🆔 ID Sessão: ${data.custom_id}`);
-
-        const webLeadId = data.custom_id || `WEB-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-        const createdTime = Math.floor(Date.now() / 1000);
         const email = data.email ? data.email.toLowerCase().trim() : null;
         const phone = data.phone ? data.phone.replace(/\D/g, '') : null;
         
@@ -127,6 +120,37 @@ app.post('/capture-site-data', async (req, res) => {
             firstName = parts[0];
             lastName = parts.slice(1).join(' ');
         }
+
+        console.log(' ');
+        console.log('🚀 [SITE] DADO RECEBIDO');
+
+        // --- LÓGICA 1: IMPEDIR DUPLICAÇÃO POR CLIQUE FRENÉTICO ---
+        // Se o lead já existe nas últimas 24h, usamos o MESMO ID.
+        let webLeadId = null;
+        let isNewLead = true;
+
+        const checkQuery = `
+            SELECT facebook_lead_id, created_time 
+            FROM leads 
+            WHERE (email = $1 OR phone = $2) 
+            AND created_time > $3 
+            ORDER BY created_time DESC 
+            LIMIT 1
+        `;
+        
+        const oneDayAgo = Math.floor(Date.now() / 1000) - 86400; 
+        const existingLead = await client.query(checkQuery, [email, phone, oneDayAgo]);
+
+        if (existingLead.rows.length > 0) {
+            webLeadId = existingLead.rows[0].facebook_lead_id;
+            isNewLead = false;
+            console.log(`⚠️ Lead Existente (Janela 24h). Mantendo ID: ${webLeadId}`);
+        } else {
+            webLeadId = data.custom_id || `WEB-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+            console.log(`✨ Novo Lead Criado. ID: ${webLeadId}`);
+        }
+
+        const createdTime = isNewLead ? Math.floor(Date.now() / 1000) : existingLead.rows[0].created_time;
 
         const queryText = `
             INSERT INTO leads (facebook_lead_id, created_time, email, phone, first_name, last_name, fbc, fbp, client_ip_address, client_user_agent, platform, is_organic, form_name)
@@ -146,8 +170,8 @@ app.post('/capture-site-data', async (req, res) => {
             webLeadId, createdTime, email, phone, firstName, lastName, data.fbc, data.fbp, ip, userAgent
         ]);
 
-        console.log('💾 [DB] Salvo com sucesso!');
-        res.status(200).json({ success: true });
+        console.log('💾 [DB] Dados salvos/atualizados com sucesso!');
+        res.status(200).json({ success: true, id: webLeadId });
 
     } catch (error) {
         console.error('❌ [ERRO] Falha ao salvar:', error);
@@ -182,7 +206,14 @@ app.post('/webhook', async (req, res) => {
         let dbRow;
         let result;
         let attempts = 0;
-        const searchQuery = `SELECT * FROM leads WHERE email = $1 OR phone LIKE '%' || $2 LIMIT 1`;
+        
+        // Busca o registro mais antigo (o original) para calcular a idade correta
+        const searchQuery = `
+            SELECT * FROM leads 
+            WHERE email = $1 OR phone LIKE '%' || $2 
+            ORDER BY created_time ASC 
+            LIMIT 1
+        `;
 
         while (attempts < 3) {
             attempts++;
@@ -192,33 +223,29 @@ app.post('/webhook', async (req, res) => {
                 console.log(`✅ Lead encontrado no DB (Tentativa ${attempts})`);
                 break; 
             } else {
-                if (attempts < 3) await sleep(3000);
+                if (attempts < 3) await sleep(2000);
             }
         }
 
         if (!dbRow) {
-            console.log('❌ Lead não encontrado no DB. Ignorando evento CRM para evitar disparos vazios.');
+            console.log('❌ Lead não encontrado no DB. Ignorando.');
             return res.status(200).send('Não encontrado.');
         }
 
         // ====================================================================
-        // 🛡️ BLOCO DE PROTEÇÃO HÍBRIDO (SITE vs NATIVO) - V8.11
+        // 🛑 TRAVA DE SEGURANÇA V8.15 (APENAS PARA LEADS DO SITE)
         // ====================================================================
         
-        const now = Math.floor(Date.now() / 1000);
-        const leadCreatedTime = dbRow.created_time || now;
-        const secondsSinceCreation = now - leadCreatedTime;
-        const minutesSinceCreation = secondsSinceCreation / 60;
-
-        // Verifica se é um lead do SITE (ID começa com WEB-)
         const isSiteLead = dbRow.facebook_lead_id && String(dbRow.facebook_lead_id).startsWith('WEB-');
-
-        // A REGRA DOS 3 MINUTOS SÓ SE APLICA PARA LEADS DO SITE!
-        // Se for Nativo (importado depois), a gente deixa passar sempre.
-        if (facebookEventName === 'Lead' && isSiteLead && minutesSinceCreation > 3) {
-            console.log(`🛑 [FILTRO] Evento "Lead" BLOQUEADO (Tempo).`);
-            console.log(`   Tipo: SITE | Idade: ${minutesSinceCreation.toFixed(1)} min.`);
-            return res.status(200).send('Ignorado: Site Lead Antigo.');
+        const now = Math.floor(Date.now() / 1000);
+        const leadAgeSeconds = now - Number(dbRow.created_time);
+        
+        // SE for Lead do SITE, for evento "Lead" (Novos) e tiver mais de 10 min de vida: BLOQUEIA.
+        // SE for Lead NATIVO (não começa com WEB-), PULA esse bloco e envia normalmente.
+        if (facebookEventName === 'Lead' && isSiteLead && leadAgeSeconds > 600) {
+            console.log(`🛑 [BLOQUEIO INTELIGENTE] Lead do Site Retornante.`);
+            console.log(`   Motivo: Lead WEB criado há ${(leadAgeSeconds/3600).toFixed(1)} horas. Já enviado.`);
+            return res.status(200).send('Bloqueado: Lead Antigo.');
         }
 
         // ====================================================================
@@ -250,13 +277,14 @@ app.post('/webhook', async (req, res) => {
             userData.lead_id = dbRow.facebook_lead_id;
         }
 
+        // Event ID composto para deduplicação robusta
+        const uniqueEventId = `${dbRow.facebook_lead_id}_${facebookEventName}`;
         const eventTime = Math.floor(Date.now() / 1000);
         
-        // Mantemos o event_id para deduplicação nativa
         const eventData = { 
             event_name: facebookEventName, 
             event_time: eventTime,
-            event_id: dbRow.facebook_lead_id, 
+            event_id: uniqueEventId, 
             action_source: 'website',
             user_data: userData,
             custom_data: { 
@@ -270,7 +298,7 @@ app.post('/webhook', async (req, res) => {
 
         const facebookAPIUrl = `https://graph.facebook.com/v24.0/${PIXEL_ID}/events?access_token=${FB_ACCESS_TOKEN}`;
         
-        console.log(`📤 Enviando '${facebookEventName}' (ID: ${dbRow.facebook_lead_id})...`);
+        console.log(`📤 Enviando '${facebookEventName}' (ID: ${uniqueEventId})...`);
         await axios.post(facebookAPIUrl, { data: [eventData] });
 
         console.log(`✅ SUCESSO!`);
@@ -360,7 +388,6 @@ app.post('/import-leads', async (req, res) => {
             const id = lead.id || lead.facebook_lead_id;
             if (!id) continue;
             
-            // TRATAMENTO: Data
             let createdTimestamp = null;
             if (lead.created_time) {
                 const asString = String(lead.created_time);
@@ -372,7 +399,6 @@ app.post('/import-leads', async (req, res) => {
                 }
             }
 
-            // TRATAMENTO: Boolean (is_organic)
             let isOrganic = false;
             if (lead.is_organic === true || String(lead.is_organic).toLowerCase() === 'true') {
                 isOrganic = true;
@@ -403,7 +429,7 @@ app.post('/import-leads', async (req, res) => {
 // ============================================================================
 // 6. INICIALIZAÇÃO
 // ============================================================================
-app.get('/', (req, res) => res.send('🟢 Servidor V8.11 (Proteção Híbrida) Online!'));
+app.get('/', (req, res) => res.send('🟢 Servidor V8.15 (Anti-Flood Site + Suporte Nativo) Online!'));
 
 const startServer = async () => {
     try {
