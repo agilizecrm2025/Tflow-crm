@@ -1,5 +1,5 @@
 // ============================================================================
-// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.15 - ANTI-FLOOD SITE + SUPORTE NATIVO)
+// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.19 - RESGATE POR NOME + ANTI-FLOOD)
 // ============================================================================
 
 const express = require('express');
@@ -125,7 +125,6 @@ app.post('/capture-site-data', async (req, res) => {
         console.log('🚀 [SITE] DADO RECEBIDO');
 
         // --- LÓGICA 1: IMPEDIR DUPLICAÇÃO POR CLIQUE FRENÉTICO ---
-        // Se o lead já existe nas últimas 24h, usamos o MESMO ID.
         let webLeadId = null;
         let isNewLead = true;
 
@@ -196,55 +195,95 @@ app.post('/webhook', async (req, res) => {
         
         const leadEmail = leadData.lead.email ? leadData.lead.email.toLowerCase().trim() : null;
         let leadPhone = leadData.lead.phone ? leadData.lead.phone.replace(/\D/g, '') : null;
-        if (!leadEmail && !leadPhone) return res.status(400).send('Sem contatos.');
+        
+        // Tratamento do nome para busca de resgate
+        let crmFirstName = leadData.lead.first_name || '';
+        let crmLastName = leadData.lead.last_name || '';
+        
+        // Se o CRM mandar o nome tudo junto, tentamos separar
+        if (!crmFirstName && leadData.lead.name) {
+             const parts = leadData.lead.name.split(' ');
+             crmFirstName = parts[0];
+             crmLastName = parts.slice(1).join(' ');
+        }
 
         let searchPhone = leadPhone;
         if (searchPhone && searchPhone.startsWith('55') && searchPhone.length > 11) {
             searchPhone = searchPhone.substring(2);
         }
 
+        console.log(`🔍 [BUSCA 1] Email/Fone:`);
+        console.log(`   📧 ${leadEmail || 'N/A'} | 📱 ${searchPhone || 'N/A'}`);
+
         let dbRow;
         let result;
         let attempts = 0;
         
-        // Busca o registro mais antigo (o original) para calcular a idade correta
+        // 1. BUSCA PRINCIPAL (E-MAIL OU TELEFONE)
         const searchQuery = `
             SELECT * FROM leads 
-            WHERE email = $1 OR phone LIKE '%' || $2 
+            WHERE 
+               (email IS NOT NULL AND email = $1)
+               OR 
+               (phone IS NOT NULL AND phone LIKE '%' || $2)
             ORDER BY created_time ASC 
             LIMIT 1
         `;
 
-        while (attempts < 3) {
+        while (attempts < 2) { 
             attempts++;
-            result = await pool.query(searchQuery, [leadEmail, searchPhone]);
+            result = await pool.query(searchQuery, [leadEmail, searchPhone || '00000000000']);
             if (result.rows.length > 0) {
                 dbRow = result.rows[0];
-                console.log(`✅ Lead encontrado no DB (Tentativa ${attempts})`);
+                console.log(`✅ Lead encontrado via Contato (Tentativa ${attempts})`);
                 break; 
             } else {
-                if (attempts < 3) await sleep(2000);
+                if (attempts < 2) await sleep(1500);
+            }
+        }
+
+        // 2. TENTATIVA DE RESGATE (SE NÃO ACHOU POR EMAIL/FONE E TEM NOME)
+        
+        if (!dbRow && crmFirstName) {
+            console.log(`⚠️ Não achou por contato. Tentando RESGATE POR NOME: "${crmFirstName}"...`);
+            
+            // Busca por nome nas últimas 24h (86400s) para evitar homônimos muito antigos
+            const nameSearchQuery = `
+                SELECT * FROM leads 
+                WHERE first_name ILIKE $1 
+                AND (last_name ILIKE $2 OR $2 = '')
+                AND created_time > $3
+                ORDER BY created_time DESC 
+                LIMIT 1
+            `;
+            
+            const oneDayAgo = Math.floor(Date.now() / 1000) - 86400;
+            const nameResult = await pool.query(nameSearchQuery, [crmFirstName, crmLastName, oneDayAgo]);
+            
+            if (nameResult.rows.length > 0) {
+                dbRow = nameResult.rows[0];
+                console.log(`✅ LEAD RESGATADO PELO NOME! ID: ${dbRow.facebook_lead_id}`);
+                console.log(`   (O CRM provavelmente não enviou email/fone, mas o Site salvou)`);
             }
         }
 
         if (!dbRow) {
-            console.log('❌ Lead não encontrado no DB. Ignorando.');
+            console.log('❌ Lead não encontrado nem por contato, nem por nome. Ignorando.');
             return res.status(200).send('Não encontrado.');
         }
 
         // ====================================================================
-        // 🛑 TRAVA DE SEGURANÇA V8.15 (APENAS PARA LEADS DO SITE)
+        // 🛑 TRAVA DE SEGURANÇA V8.19 (Janela 2 Horas)
         // ====================================================================
         
         const isSiteLead = dbRow.facebook_lead_id && String(dbRow.facebook_lead_id).startsWith('WEB-');
         const now = Math.floor(Date.now() / 1000);
         const leadAgeSeconds = now - Number(dbRow.created_time);
         
-        // SE for Lead do SITE, for evento "Lead" (Novos) e tiver mais de 10 min de vida: BLOQUEIA.
-        // SE for Lead NATIVO (não começa com WEB-), PULA esse bloco e envia normalmente.
-        if (facebookEventName === 'Lead' && isSiteLead && leadAgeSeconds > 600) {
+        // Se for lead WEB e tiver mais de 2 horas (7200s), bloqueia o "Lead" repetido.
+        if (facebookEventName === 'Lead' && isSiteLead && leadAgeSeconds > 7200) {
             console.log(`🛑 [BLOQUEIO INTELIGENTE] Lead do Site Retornante.`);
-            console.log(`   Motivo: Lead WEB criado há ${(leadAgeSeconds/3600).toFixed(1)} horas. Já enviado.`);
+            console.log(`   Motivo: Lead WEB criado há ${(leadAgeSeconds/3600).toFixed(1)} horas.`);
             return res.status(200).send('Bloqueado: Lead Antigo.');
         }
 
@@ -255,29 +294,32 @@ app.post('/webhook', async (req, res) => {
         if (!PIXEL_ID || !FB_ACCESS_TOKEN) return res.status(500).send('Erro Config.');
 
         const userData = {};
-        if (dbRow.email) userData.em = [crypto.createHash('sha256').update(dbRow.email).digest('hex')];
-        if (dbRow.phone) userData.ph = [crypto.createHash('sha256').update(dbRow.phone).digest('hex')];
-        if (dbRow.first_name) userData.fn = [crypto.createHash('sha256').update(dbRow.first_name.toLowerCase()).digest('hex')];
-        if (dbRow.last_name) userData.ln = [crypto.createHash('sha256').update(dbRow.last_name.toLowerCase()).digest('hex')];
-        if (dbRow.city) userData.ct = [crypto.createHash('sha256').update(dbRow.city.toLowerCase()).digest('hex')];
-        if (dbRow.estado) userData.st = [crypto.createHash('sha256').update(dbRow.estado.toLowerCase()).digest('hex')];
-        if (dbRow.zip_code) userData.zp = [crypto.createHash('sha256').update(String(dbRow.zip_code).replace(/\D/g, '')).digest('hex')];
-        if (dbRow.dob) userData.db = [crypto.createHash('sha256').update(String(dbRow.dob).replace(/\D/g, '')).digest('hex')];
+        // Prioriza dados do banco (que vieram do site e são mais completos)
+        const d = dbRow; 
+        
+        if (d.email) userData.em = [crypto.createHash('sha256').update(d.email).digest('hex')];
+        if (d.phone) userData.ph = [crypto.createHash('sha256').update(d.phone).digest('hex')];
+        if (d.first_name) userData.fn = [crypto.createHash('sha256').update(d.first_name.toLowerCase()).digest('hex')];
+        if (d.last_name) userData.ln = [crypto.createHash('sha256').update(d.last_name.toLowerCase()).digest('hex')];
+        if (d.city) userData.ct = [crypto.createHash('sha256').update(d.city.toLowerCase()).digest('hex')];
+        if (d.estado) userData.st = [crypto.createHash('sha256').update(d.estado.toLowerCase()).digest('hex')];
+        if (d.zip_code) userData.zp = [crypto.createHash('sha256').update(String(d.zip_code).replace(/\D/g, '')).digest('hex')];
+        if (d.dob) userData.db = [crypto.createHash('sha256').update(String(d.dob).replace(/\D/g, '')).digest('hex')];
 
-        if (dbRow.fbc) userData.fbc = dbRow.fbc;
-        if (dbRow.fbp) userData.fbp = dbRow.fbp;
-        if (dbRow.client_ip_address) userData.client_ip_address = dbRow.client_ip_address;
-        if (dbRow.client_user_agent) userData.client_user_agent = dbRow.client_user_agent;
+        if (d.fbc) userData.fbc = d.fbc;
+        if (d.fbp) userData.fbp = d.fbp;
+        if (d.client_ip_address) userData.client_ip_address = d.client_ip_address;
+        if (d.client_user_agent) userData.client_user_agent = d.client_user_agent;
 
-        if (dbRow.facebook_lead_id) {
-            userData.external_id = [crypto.createHash('sha256').update(dbRow.facebook_lead_id).digest('hex')];
+        if (d.facebook_lead_id) {
+            userData.external_id = [crypto.createHash('sha256').update(d.facebook_lead_id).digest('hex')];
         }
 
-        if (dbRow.facebook_lead_id && !dbRow.facebook_lead_id.startsWith('WEB-')) {
-            userData.lead_id = dbRow.facebook_lead_id;
+        if (d.facebook_lead_id && !d.facebook_lead_id.startsWith('WEB-')) {
+            userData.lead_id = d.facebook_lead_id;
         }
 
-        // Event ID composto para deduplicação robusta
+        // Deduplicação
         const uniqueEventId = `${dbRow.facebook_lead_id}_${facebookEventName}`;
         const eventTime = Math.floor(Date.now() / 1000);
         
@@ -429,7 +471,7 @@ app.post('/import-leads', async (req, res) => {
 // ============================================================================
 // 6. INICIALIZAÇÃO
 // ============================================================================
-app.get('/', (req, res) => res.send('🟢 Servidor V8.15 (Anti-Flood Site + Suporte Nativo) Online!'));
+app.get('/', (req, res) => res.send('🟢 Servidor V8.19 (Resgate por Nome + Anti-Flood) Online!'));
 
 const startServer = async () => {
     try {
