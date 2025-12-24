@@ -1,5 +1,5 @@
 // ============================================================================
-// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.19 - RESGATE POR NOME + ANTI-FLOOD)
+// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.21 - MAIOR TOLERÂNCIA DE ATRASO)
 // ============================================================================
 
 const express = require('express');
@@ -89,7 +89,6 @@ const initializeDatabase = async () => {
             const check = await client.query("SELECT 1 FROM information_schema.columns WHERE table_name='leads' AND column_name=$1", [columnName]);
             if (check.rows.length === 0) {
                 await client.query(`ALTER TABLE leads ADD COLUMN ${columnName} ${columnType};`);
-                console.log(`➕ Coluna nova criada: ${columnName}`);
             }
         }
         console.log('✅ Banco de Dados Pronto!');
@@ -122,9 +121,8 @@ app.post('/capture-site-data', async (req, res) => {
         }
 
         console.log(' ');
-        console.log('🚀 [SITE] DADO RECEBIDO');
+        console.log(`🚀 [SITE] RECEBIDO: ${firstName} | ${email || 'Sem Email'} | ${phone || 'Sem Fone'}`);
 
-        // --- LÓGICA 1: IMPEDIR DUPLICAÇÃO POR CLIQUE FRENÉTICO ---
         let webLeadId = null;
         let isNewLead = true;
 
@@ -196,11 +194,8 @@ app.post('/webhook', async (req, res) => {
         const leadEmail = leadData.lead.email ? leadData.lead.email.toLowerCase().trim() : null;
         let leadPhone = leadData.lead.phone ? leadData.lead.phone.replace(/\D/g, '') : null;
         
-        // Tratamento do nome para busca de resgate
         let crmFirstName = leadData.lead.first_name || '';
         let crmLastName = leadData.lead.last_name || '';
-        
-        // Se o CRM mandar o nome tudo junto, tentamos separar
         if (!crmFirstName && leadData.lead.name) {
              const parts = leadData.lead.name.split(' ');
              crmFirstName = parts[0];
@@ -212,42 +207,59 @@ app.post('/webhook', async (req, res) => {
             searchPhone = searchPhone.substring(2);
         }
 
-        console.log(`🔍 [BUSCA 1] Email/Fone:`);
-        console.log(`   📧 ${leadEmail || 'N/A'} | 📱 ${searchPhone || 'N/A'}`);
+        // Busca por Sufixo (Últimos 8 dígitos)
+        let phoneSuffix = '';
+        if (leadPhone && leadPhone.length >= 8) {
+            phoneSuffix = leadPhone.slice(-8); 
+        }
+
+        console.log(`🔍 [BUSCA] Iniciando varredura no DB...`);
+        console.log(`   📧 Email: ${leadEmail || 'N/A'}`);
+        console.log(`   📱 Fone Completo: ${searchPhone || 'N/A'} (Sufixo: ${phoneSuffix})`);
 
         let dbRow;
         let result;
         let attempts = 0;
         
-        // 1. BUSCA PRINCIPAL (E-MAIL OU TELEFONE)
+        // Estratégia de Busca: Email OR Fone Completo OR Sufixo do Fone
         const searchQuery = `
             SELECT * FROM leads 
             WHERE 
                (email IS NOT NULL AND email = $1)
                OR 
                (phone IS NOT NULL AND phone LIKE '%' || $2)
+               OR
+               (phone IS NOT NULL AND $3 <> '' AND phone LIKE '%' || $3)
             ORDER BY created_time ASC 
             LIMIT 1
         `;
 
-        while (attempts < 2) { 
+        // ====================================================================
+        // 🔄 LOOP DE PACIÊNCIA (AUMENTADO PARA 5 TENTATIVAS x 3 SEGUNDOS)
+        // ====================================================================
+        // Isso dá tempo (~15s) para o script do site salvar o lead no banco
+        // caso o webhook do CRM chegue muito rápido.
+        
+        while (attempts < 5) {
             attempts++;
-            result = await pool.query(searchQuery, [leadEmail, searchPhone || '00000000000']);
+            result = await pool.query(searchQuery, [leadEmail, searchPhone || '0000', phoneSuffix]);
+            
             if (result.rows.length > 0) {
                 dbRow = result.rows[0];
-                console.log(`✅ Lead encontrado via Contato (Tentativa ${attempts})`);
+                console.log(`✅ Lead encontrado no DB (Tentativa ${attempts})`);
                 break; 
             } else {
-                if (attempts < 2) await sleep(1500);
+                if (attempts < 5) {
+                    console.log(`⏳ Lead ainda não chegou no Banco. Esperando... (${attempts}/5)`);
+                    await sleep(3000); // Espera 3 segundos antes de tentar de novo
+                }
             }
         }
 
-        // 2. TENTATIVA DE RESGATE (SE NÃO ACHOU POR EMAIL/FONE E TEM NOME)
-        
+        // 2. TENTATIVA DE RESGATE POR NOME (Se falhou por contato após 15s)
         if (!dbRow && crmFirstName) {
-            console.log(`⚠️ Não achou por contato. Tentando RESGATE POR NOME: "${crmFirstName}"...`);
+            console.log(`⚠️ Contato não encontrado após espera. Tentando RESGATE POR NOME: "${crmFirstName}"...`);
             
-            // Busca por nome nas últimas 24h (86400s) para evitar homônimos muito antigos
             const nameSearchQuery = `
                 SELECT * FROM leads 
                 WHERE first_name ILIKE $1 
@@ -263,24 +275,22 @@ app.post('/webhook', async (req, res) => {
             if (nameResult.rows.length > 0) {
                 dbRow = nameResult.rows[0];
                 console.log(`✅ LEAD RESGATADO PELO NOME! ID: ${dbRow.facebook_lead_id}`);
-                console.log(`   (O CRM provavelmente não enviou email/fone, mas o Site salvou)`);
             }
         }
 
         if (!dbRow) {
-            console.log('❌ Lead não encontrado nem por contato, nem por nome. Ignorando.');
+            console.log('❌ TIMEOUT: Lead não encontrado após todas as tentativas.');
             return res.status(200).send('Não encontrado.');
         }
 
         // ====================================================================
-        // 🛑 TRAVA DE SEGURANÇA V8.19 (Janela 2 Horas)
+        // 🛑 TRAVA DE SEGURANÇA V8.21 (Janela 2 Horas)
         // ====================================================================
         
         const isSiteLead = dbRow.facebook_lead_id && String(dbRow.facebook_lead_id).startsWith('WEB-');
         const now = Math.floor(Date.now() / 1000);
         const leadAgeSeconds = now - Number(dbRow.created_time);
         
-        // Se for lead WEB e tiver mais de 2 horas (7200s), bloqueia o "Lead" repetido.
         if (facebookEventName === 'Lead' && isSiteLead && leadAgeSeconds > 7200) {
             console.log(`🛑 [BLOQUEIO INTELIGENTE] Lead do Site Retornante.`);
             console.log(`   Motivo: Lead WEB criado há ${(leadAgeSeconds/3600).toFixed(1)} horas.`);
@@ -294,7 +304,6 @@ app.post('/webhook', async (req, res) => {
         if (!PIXEL_ID || !FB_ACCESS_TOKEN) return res.status(500).send('Erro Config.');
 
         const userData = {};
-        // Prioriza dados do banco (que vieram do site e são mais completos)
         const d = dbRow; 
         
         if (d.email) userData.em = [crypto.createHash('sha256').update(d.email).digest('hex')];
@@ -319,7 +328,6 @@ app.post('/webhook', async (req, res) => {
             userData.lead_id = d.facebook_lead_id;
         }
 
-        // Deduplicação
         const uniqueEventId = `${dbRow.facebook_lead_id}_${facebookEventName}`;
         const eventTime = Math.floor(Date.now() / 1000);
         
@@ -471,7 +479,7 @@ app.post('/import-leads', async (req, res) => {
 // ============================================================================
 // 6. INICIALIZAÇÃO
 // ============================================================================
-app.get('/', (req, res) => res.send('🟢 Servidor V8.19 (Resgate por Nome + Anti-Flood) Online!'));
+app.get('/', (req, res) => res.send('🟢 Servidor V8.21 (Modo Paciência 15s) Online!'));
 
 const startServer = async () => {
     try {
