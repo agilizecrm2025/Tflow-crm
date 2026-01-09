@@ -17,13 +17,15 @@ app.use(express.json({ limit: '50mb' }));
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ============================================================================
-// 1. CONFIGURAÇÕES E MAPA DE EVENTOS
+// 1. CONFIGURAÇÕES E MAPA DE EVENTOS (LÓGICA CORRIGIDA)
 // ============================================================================
 
 const mapCRMEventToFacebookEvent = (crmEvent) => {
-    if (!crmEvent) return 'Lead'; 
+    // --- CORREÇÃO: Se não tiver tag, retorna null para NÃO virar Lead falso ---
+    if (!crmEvent) return null; 
+    
     switch (crmEvent.toUpperCase()) {
-        case 'NOVOS': return 'Lead';
+        case 'NOVOS': return 'Lead'; // Único que conta como Lead (Conversão)
         case 'ATENDEU': return 'Atendeu';
         case 'OPORTUNIDADE': return 'Oportunidade';
         case 'AVANÇADO': return 'Avançado';
@@ -31,6 +33,7 @@ const mapCRMEventToFacebookEvent = (crmEvent) => {
         case 'VENCEMOS': return 'Vencemos';
         case 'QUER EMPREGO': return 'Desqualificado';
         case 'QUER EMPRESTIMO': return 'Não Qualificado';
+        // Se for outra tag não listada acima, mantém o nome original
         default: return crmEvent;
     }
 };
@@ -186,9 +189,17 @@ app.post('/webhook', async (req, res) => {
     try {
         const leadData = req.body;
         const crmEventName = leadData.tag ? leadData.tag.name : null;
-        if (!crmEventName) return res.status(200).send('Sem tag.');
 
         const facebookEventName = mapCRMEventToFacebookEvent(crmEventName);
+
+        // --- TRAVA DE SEGURANÇA (NOVO) ---
+        // Se a função retornou null (ex: tag vazia ou irrelevante), ignora.
+        if (!facebookEventName) {
+            console.log(`🚫 Ignorado: Evento de movimentação sem tag relevante (${crmEventName}).`);
+            return res.status(200).send('Ignorado.');
+        }
+        // ---------------------------------
+
         if (!leadData.lead) return res.status(400).send('Sem dados.');
         
         const leadEmail = leadData.lead.email ? leadData.lead.email.toLowerCase().trim() : null;
@@ -237,8 +248,6 @@ app.post('/webhook', async (req, res) => {
         // ====================================================================
         // 🔄 LOOP DE PACIÊNCIA (AUMENTADO PARA 5 TENTATIVAS x 3 SEGUNDOS)
         // ====================================================================
-        // Isso dá tempo (~15s) para o script do site salvar o lead no banco
-        // caso o webhook do CRM chegue muito rápido.
         
         while (attempts < 5) {
             attempts++;
