@@ -370,7 +370,7 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ============================================================================
-// 4. ROTA DE BACKUP CSV (CORRIGIDA - SEM ERRO DE DOUBLE RELEASE)
+// 4. ROTA DE BACKUP CSV (CORRIGIDA - SEM ERRO DE HEADERS)
 // ============================================================================
 app.get('/baixar-backup', async (req, res) => {
     const client = await pool.connect();
@@ -379,11 +379,14 @@ app.get('/baixar-backup', async (req, res) => {
         const queryText = `SELECT * FROM leads ORDER BY created_time DESC`;
         const result = await client.query(queryText);
         
-        // REMOVIDO: client.release(); (Não liberamos aqui para evitar conflito)
+        if (result.rows.length === 0) {
+            // Se estiver vazio, liberamos aqui e respondemos
+            // O finally vai tentar liberar de novo, mas o pg-pool lida bem se tratarmos certinho
+            // Mas para evitar erro, deixamos o finally lidar com o release
+            return res.send('Banco vazio.');
+        }
 
-        if (result.rows.length === 0) return res.send('Banco vazio.');
-
-        // 2. Mapeamento de colunas (Mantivemos sua configuração exata)
+        // 2. Mapeamento de colunas
         const mapColumns = {
             'facebook_lead_id': 'id',
             'created_time': 'created_time',
@@ -444,18 +447,20 @@ app.get('/baixar-backup', async (req, res) => {
             csvRows.push(values.join(';'));
         }
 
+        // 4. Envio Correto (TUDO JUNTO)
         res.setHeader('Content-Type', 'text/csv; charset=utf-8');
         res.setHeader('Content-Disposition', 'attachment; filename="backup_leads_completo.csv"');
-        res.write('\ufeff');
-        res.status(200).send(csvRows.join('\n'));
+        
+        // CORREÇÃO AQUI: Concatenamos o BOM (\ufeff) direto no texto final
+        // Assim enviamos tudo de uma vez só e o erro de Headers some.
+        const csvContent = '\ufeff' + csvRows.join('\n');
+        
+        res.status(200).send(csvContent);
 
     } catch (error) {
         console.error('Erro CSV:', error);
-        // REMOVIDO: if (client) client.release(); (Isso causava o erro)
         if (!res.headersSent) res.status(500).send('Erro ao gerar backup.');
     } finally {
-        // AQUI É O LUGAR CORRETO
-        // O finally roda SEMPRE, seja sucesso ou erro, e apenas UMA VEZ.
         if (client) client.release();
     }
 });
