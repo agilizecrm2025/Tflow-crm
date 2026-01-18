@@ -370,34 +370,95 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ============================================================================
-// 4. ROTA DE BACKUP CSV
+// 4. ROTA DE BACKUP CSV (ORDEM EXATA E NOMES PERSONALIZADOS)
 // ============================================================================
 app.get('/baixar-backup', async (req, res) => {
+    const client = await pool.connect();
     try {
-        const client = await pool.connect();
-        const result = await client.query('SELECT * FROM leads');
-        client.release();
+        // 1. Buscamos TUDO do banco
+        const queryText = `SELECT * FROM leads ORDER BY created_time DESC`;
+        const result = await client.query(queryText);
+        
+        client.release(); // Libera o banco cedo
 
         if (result.rows.length === 0) return res.send('Banco vazio.');
 
-        const headers = Object.keys(result.rows[0]);
-        const csvRows = [];
-        csvRows.push(headers.join(','));
+        // 2. Definimos a ORDEM EXATA e o NOME que vai aparecer no Excel
+        // Chave = Nome da coluna no Banco de Dados
+        // Valor = Nome que você quer no Cabeçalho do Excel
+        const mapColumns = {
+            'facebook_lead_id': 'id',
+            'created_time': 'created_time',
+            'ad_id': 'ad_id',
+            'ad_name': 'ad_name',
+            'adset_id': 'adset_id',
+            'adset_name': 'adset_name',
+            'campaign_id': 'campaign_id',
+            'campaign_name': 'campaign_name',
+            'form_id': 'form_id',
+            'form_name': 'form_name',
+            'is_organic': 'is_organic',
+            'platform': 'platform',
+            'first_name': 'nome',                  // Mudando de first_name -> nome
+            'last_name': 'sobrenome',              // Mudando de last_name -> sobrenome
+            'phone': 'phone_number',               // Mudando de phone -> phone_number
+            'email': 'email',
+            'city': 'city',
+            'estado': 'state',                     // Mudando de estado -> state
+            'zip_code': 'cep',                     // Mudando de zip_code -> cep
+            'dob': 'data_de_nascimento',           // Mudando de dob -> data_de_nascimento
+            'lead_status': 'lead_status',
+            'fbc': 'fbc',
+            'fbp': 'fbp',
+            'client_ip_address': 'client_ip_address',
+            'client_user_agent': 'client_user_agent'
+        };
 
+        const dbKeys = Object.keys(mapColumns);    // Nomes internos (para buscar o dado)
+        const csvHeaders = Object.values(mapColumns); // Nomes externos (para o Excel)
+
+        const csvRows = [];
+        
+        // Adiciona o cabeçalho (usando ; para Excel Brasil)
+        csvRows.push(csvHeaders.join(';')); 
+
+        // 3. Preenche as linhas seguindo a ordem estrita
         for (const row of result.rows) {
-            const values = headers.map(header => {
-                const val = row[header];
-                const escaped = ('' + (val || '')).replace(/"/g, '""');
+            const values = dbKeys.map(key => {
+                let val = row[key];
+
+                // Tratamento especial para datas (Converter timestamp se necessário)
+                if (key === 'created_time' && val && !isNaN(val) && String(val).length > 5) {
+                    try {
+                        // Converte Timestamp Unix para Data Legível (Brasil -3h)
+                        const dateObj = new Date(Number(val) * 1000); // Se estiver em segundos
+                        // Ajuste manual simples para -3h se o servidor for UTC
+                        dateObj.setHours(dateObj.getHours() - 3);
+                        val = dateObj.toISOString().replace('T', ' ').substring(0, 19);
+                    } catch (e) { /* mantem original se der erro */ }
+                }
+
+                // Limpa aspas que possam existir dentro do texto
+                let escaped = ('' + (val || '')).replace(/"/g, '""');
+                
+                // TRUQUE DO EXCEL: Força IDs e Telefones a serem Texto para não virar 5,55E+11
+                if (key === 'facebook_lead_id' || key === 'phone' || key === 'ad_id' || key === 'zip_code') {
+                    return `="${escaped}"`; 
+                }
+                
                 return `"${escaped}"`;
             });
-            csvRows.push(values.join(','));
+            csvRows.push(values.join(';'));
         }
 
-        res.setHeader('Content-Type', 'text/csv');
-        res.setHeader('Content-Disposition', 'attachment; filename="backup_leads.csv"');
+        // 4. Envia o arquivo
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename="backup_leads_completo.csv"');
+        res.write('\ufeff'); // BOM para acentos funcionarem
         res.status(200).send(csvRows.join('\n'));
 
     } catch (error) {
+        if (client) client.release();
         console.error('Erro CSV:', error);
         res.status(500).send('Erro ao gerar backup.');
     }
