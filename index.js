@@ -370,7 +370,7 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ============================================================================
-// 4. ROTA DE BACKUP CSV (ORDEM EXATA E NOMES PERSONALIZADOS)
+// 4. ROTA DE BACKUP CSV (CORRIGIDA - SEM ERRO DE DOUBLE RELEASE)
 // ============================================================================
 app.get('/baixar-backup', async (req, res) => {
     const client = await pool.connect();
@@ -379,13 +379,11 @@ app.get('/baixar-backup', async (req, res) => {
         const queryText = `SELECT * FROM leads ORDER BY created_time DESC`;
         const result = await client.query(queryText);
         
-        client.release(); // Libera o banco cedo
+        // REMOVIDO: client.release(); (Não liberamos aqui para evitar conflito)
 
         if (result.rows.length === 0) return res.send('Banco vazio.');
 
-        // 2. Definimos a ORDEM EXATA e o NOME que vai aparecer no Excel
-        // Chave = Nome da coluna no Banco de Dados
-        // Valor = Nome que você quer no Cabeçalho do Excel
+        // 2. Mapeamento de colunas (Mantivemos sua configuração exata)
         const mapColumns = {
             'facebook_lead_id': 'id',
             'created_time': 'created_time',
@@ -399,14 +397,14 @@ app.get('/baixar-backup', async (req, res) => {
             'form_name': 'form_name',
             'is_organic': 'is_organic',
             'platform': 'platform',
-            'first_name': 'nome',                  // Mudando de first_name -> nome
-            'last_name': 'sobrenome',              // Mudando de last_name -> sobrenome
-            'phone': 'phone_number',               // Mudando de phone -> phone_number
+            'first_name': 'nome',
+            'last_name': 'sobrenome',
+            'phone': 'phone_number',
             'email': 'email',
             'city': 'city',
-            'estado': 'state',                     // Mudando de estado -> state
-            'zip_code': 'cep',                     // Mudando de zip_code -> cep
-            'dob': 'data_de_nascimento',           // Mudando de dob -> data_de_nascimento
+            'estado': 'state',
+            'zip_code': 'cep',
+            'dob': 'data_de_nascimento',
             'lead_status': 'lead_status',
             'fbc': 'fbc',
             'fbp': 'fbp',
@@ -414,34 +412,29 @@ app.get('/baixar-backup', async (req, res) => {
             'client_user_agent': 'client_user_agent'
         };
 
-        const dbKeys = Object.keys(mapColumns);    // Nomes internos (para buscar o dado)
-        const csvHeaders = Object.values(mapColumns); // Nomes externos (para o Excel)
-
+        const dbKeys = Object.keys(mapColumns);
+        const csvHeaders = Object.values(mapColumns);
         const csvRows = [];
         
-        // Adiciona o cabeçalho (usando ; para Excel Brasil)
         csvRows.push(csvHeaders.join(';')); 
 
-        // 3. Preenche as linhas seguindo a ordem estrita
+        // 3. Preenchimento das linhas
         for (const row of result.rows) {
             const values = dbKeys.map(key => {
                 let val = row[key];
 
-                // Tratamento especial para datas (Converter timestamp se necessário)
+                // Conversão de Data
                 if (key === 'created_time' && val && !isNaN(val) && String(val).length > 5) {
                     try {
-                        // Converte Timestamp Unix para Data Legível (Brasil -3h)
-                        const dateObj = new Date(Number(val) * 1000); // Se estiver em segundos
-                        // Ajuste manual simples para -3h se o servidor for UTC
+                        const dateObj = new Date(Number(val) * 1000); 
                         dateObj.setHours(dateObj.getHours() - 3);
                         val = dateObj.toISOString().replace('T', ' ').substring(0, 19);
-                    } catch (e) { /* mantem original se der erro */ }
+                    } catch (e) { }
                 }
 
-                // Limpa aspas que possam existir dentro do texto
                 let escaped = ('' + (val || '')).replace(/"/g, '""');
                 
-                // TRUQUE DO EXCEL: Força IDs e Telefones a serem Texto para não virar 5,55E+11
+                // Truque do Excel
                 if (key === 'facebook_lead_id' || key === 'phone' || key === 'ad_id' || key === 'zip_code') {
                     return `="${escaped}"`; 
                 }
@@ -451,16 +444,19 @@ app.get('/baixar-backup', async (req, res) => {
             csvRows.push(values.join(';'));
         }
 
-        // 4. Envia o arquivo
         res.setHeader('Content-Type', 'text/csv; charset=utf-8');
         res.setHeader('Content-Disposition', 'attachment; filename="backup_leads_completo.csv"');
-        res.write('\ufeff'); // BOM para acentos funcionarem
+        res.write('\ufeff');
         res.status(200).send(csvRows.join('\n'));
 
     } catch (error) {
-        if (client) client.release();
         console.error('Erro CSV:', error);
-        res.status(500).send('Erro ao gerar backup.');
+        // REMOVIDO: if (client) client.release(); (Isso causava o erro)
+        if (!res.headersSent) res.status(500).send('Erro ao gerar backup.');
+    } finally {
+        // AQUI É O LUGAR CORRETO
+        // O finally roda SEMPRE, seja sucesso ou erro, e apenas UMA VEZ.
+        if (client) client.release();
     }
 });
 
