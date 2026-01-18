@@ -154,7 +154,7 @@ app.post('/capture-site-data', async (req, res) => {
 
         const queryText = `
             INSERT INTO leads (facebook_lead_id, created_time, email, phone, first_name, last_name, fbc, fbp, client_ip_address, client_user_agent, platform, is_organic, form_name)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'site_smartcred', false, 'Formulario Site')
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'site_tflow', false, 'Formulario Site')
             ON CONFLICT (facebook_lead_id) DO UPDATE SET
                 email = COALESCE(EXCLUDED.email, leads.email),
                 phone = COALESCE(EXCLUDED.phone, leads.phone),
