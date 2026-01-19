@@ -1,5 +1,5 @@
 // ============================================================================
-// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.21 - MAIOR TOLERÂNCIA DE ATRASO)
+// SERVIDOR DE INTELIGÊNCIA DE LEADS (V8.22 - BLINDAGEM TRIPLA ANTI-DUPLICIDADE)
 // ============================================================================
 
 const express = require('express');
@@ -17,23 +17,21 @@ app.use(express.json({ limit: '50mb' }));
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ============================================================================
-// 1. CONFIGURAÇÕES E MAPA DE EVENTOS (LÓGICA CORRIGIDA)
+// 1. CONFIGURAÇÕES E MAPA DE EVENTOS
 // ============================================================================
 
 const mapCRMEventToFacebookEvent = (crmEvent) => {
-    // --- CORREÇÃO: Se não tiver tag, retorna null para NÃO virar Lead falso ---
     if (!crmEvent) return null; 
     
     switch (crmEvent.toUpperCase()) {
-        case 'NOVOS': return 'Lead'; // Único que conta como Lead (Conversão)
+        case 'NOVOS': return 'Lead'; // Conversão Principal
         case 'ATENDEU': return 'Atendeu';
         case 'OPORTUNIDADE': return 'Oportunidade';
         case 'AVANÇADO': return 'Avançado';
         case 'VÍDEO': return 'Vídeo';
-        case 'VENCEMOS': return 'Vencemos';
+        case 'VENCEMOS': return 'Vencemos'; // Conversão de Venda
         case 'QUER EMPREGO': return 'Desqualificado';
         case 'QUER EMPRESTIMO': return 'Não Qualificado';
-        // Se for outra tag não listada acima, mantém o nome original
         default: return crmEvent;
     }
 };
@@ -73,9 +71,11 @@ const initializeDatabase = async () => {
                 fbc TEXT, 
                 fbp TEXT,
                 client_ip_address TEXT, 
-                client_user_agent TEXT 
+                client_user_agent TEXT,
+                last_sent_event TEXT 
             );
         `;
+        // Nota: A coluna 'last_sent_event' foi adicionada acima para a Trava de Estado
         await client.query(createTableQuery);
 
         const allColumns = {
@@ -85,12 +85,14 @@ const initializeDatabase = async () => {
             'form_name': 'TEXT', 'platform': 'TEXT', 'is_organic': 'BOOLEAN', 'lead_status': 'TEXT',
             'fbc': 'TEXT', 'fbp': 'TEXT',
             'client_ip_address': 'TEXT',
-            'client_user_agent': 'TEXT'
+            'client_user_agent': 'TEXT',
+            'last_sent_event': 'TEXT' // <--- COLUNA NOVA (TRAVA 3)
         };
 
         for (const [columnName, columnType] of Object.entries(allColumns)) {
             const check = await client.query("SELECT 1 FROM information_schema.columns WHERE table_name='leads' AND column_name=$1", [columnName]);
             if (check.rows.length === 0) {
+                console.log(`🔧 Criando nova coluna: ${columnName}`);
                 await client.query(`ALTER TABLE leads ADD COLUMN ${columnName} ${columnType};`);
             }
         }
@@ -103,7 +105,7 @@ const initializeDatabase = async () => {
 };
 
 // ============================================================================
-// 2. ROTA: CAPTURA DO SITE (ANTI-FLOOD / VÍCIO DE CLIQUE)
+// 2. ROTA: CAPTURA DO SITE (TRAVA 1 - JANELA 24H)
 // ============================================================================
 app.post('/capture-site-data', async (req, res) => {
     const client = await pool.connect();
@@ -129,6 +131,7 @@ app.post('/capture-site-data', async (req, res) => {
         let webLeadId = null;
         let isNewLead = true;
 
+        // --- TRAVA 1: Verifica se já existe nas últimas 24h ---
         const checkQuery = `
             SELECT facebook_lead_id, created_time 
             FROM leads 
@@ -182,23 +185,19 @@ app.post('/capture-site-data', async (req, res) => {
 });
 
 // ============================================================================
-// 3. ROTA: WEBHOOK (CRM -> FACEBOOK)
+// 3. ROTA: WEBHOOK (TRAVAS 2 e 3)
 // ============================================================================
 app.post('/webhook', async (req, res) => {
     console.log("--- 🔔 Webhook Recebido ---");
     try {
         const leadData = req.body;
         const crmEventName = leadData.tag ? leadData.tag.name : null;
-
         const facebookEventName = mapCRMEventToFacebookEvent(crmEventName);
 
-        // --- TRAVA DE SEGURANÇA (NOVO) ---
-        // Se a função retornou null (ex: tag vazia ou irrelevante), ignora.
         if (!facebookEventName) {
             console.log(`🚫 Ignorado: Evento de movimentação sem tag relevante (${crmEventName}).`);
             return res.status(200).send('Ignorado.');
         }
-        // ---------------------------------
 
         if (!leadData.lead) return res.status(400).send('Sem dados.');
         
@@ -217,22 +216,17 @@ app.post('/webhook', async (req, res) => {
         if (searchPhone && searchPhone.startsWith('55') && searchPhone.length > 11) {
             searchPhone = searchPhone.substring(2);
         }
-
-        // Busca por Sufixo (Últimos 8 dígitos)
         let phoneSuffix = '';
         if (leadPhone && leadPhone.length >= 8) {
             phoneSuffix = leadPhone.slice(-8); 
         }
 
         console.log(`🔍 [BUSCA] Iniciando varredura no DB...`);
-        console.log(`   📧 Email: ${leadEmail || 'N/A'}`);
-        console.log(`   📱 Fone Completo: ${searchPhone || 'N/A'} (Sufixo: ${phoneSuffix})`);
 
         let dbRow;
         let result;
         let attempts = 0;
         
-        // Estratégia de Busca: Email OR Fone Completo OR Sufixo do Fone
         const searchQuery = `
             SELECT * FROM leads 
             WHERE 
@@ -245,10 +239,7 @@ app.post('/webhook', async (req, res) => {
             LIMIT 1
         `;
 
-        // ====================================================================
-        // 🔄 LOOP DE PACIÊNCIA (AUMENTADO PARA 5 TENTATIVAS x 3 SEGUNDOS)
-        // ====================================================================
-        
+        // Loop de Paciência (15 segundos)
         while (attempts < 5) {
             attempts++;
             result = await pool.query(searchQuery, [leadEmail, searchPhone || '0000', phoneSuffix]);
@@ -260,15 +251,14 @@ app.post('/webhook', async (req, res) => {
             } else {
                 if (attempts < 5) {
                     console.log(`⏳ Lead ainda não chegou no Banco. Esperando... (${attempts}/5)`);
-                    await sleep(3000); // Espera 3 segundos antes de tentar de novo
+                    await sleep(3000);
                 }
             }
         }
 
-        // 2. TENTATIVA DE RESGATE POR NOME (Se falhou por contato após 15s)
+        // Resgate por Nome
         if (!dbRow && crmFirstName) {
-            console.log(`⚠️ Contato não encontrado após espera. Tentando RESGATE POR NOME: "${crmFirstName}"...`);
-            
+            console.log(`⚠️ Tentando RESGATE POR NOME: "${crmFirstName}"...`);
             const nameSearchQuery = `
                 SELECT * FROM leads 
                 WHERE first_name ILIKE $1 
@@ -277,7 +267,6 @@ app.post('/webhook', async (req, res) => {
                 ORDER BY created_time DESC 
                 LIMIT 1
             `;
-            
             const oneDayAgo = Math.floor(Date.now() / 1000) - 86400;
             const nameResult = await pool.query(nameSearchQuery, [crmFirstName, crmLastName, oneDayAgo]);
             
@@ -293,9 +282,8 @@ app.post('/webhook', async (req, res) => {
         }
 
         // ====================================================================
-        // 🛑 TRAVA DE SEGURANÇA V8.21 (Janela 2 Horas)
+        // 🛑 TRAVA 2: ANTIGUIDADE (Lead Velho)
         // ====================================================================
-        
         const isSiteLead = dbRow.facebook_lead_id && String(dbRow.facebook_lead_id).startsWith('WEB-');
         const now = Math.floor(Date.now() / 1000);
         const leadAgeSeconds = now - Number(dbRow.created_time);
@@ -306,6 +294,14 @@ app.post('/webhook', async (req, res) => {
             return res.status(200).send('Bloqueado: Lead Antigo.');
         }
 
+        // ====================================================================
+        // 🛑 TRAVA 3: ESTADO (Duplicidade Imediata)
+        // ====================================================================
+        if (dbRow.last_sent_event === facebookEventName) {
+            console.log(`🛑 [TRAVA DE ESTADO] O evento '${facebookEventName}' JÁ FOI ENVIADO para este lead.`);
+            console.log(`   Ignorando solicitação duplicada do Webhook/CRM.`);
+            return res.status(200).send('Duplicado: Já enviado.');
+        }
         // ====================================================================
 
         const PIXEL_ID = process.env.PIXEL_ID;
@@ -332,7 +328,6 @@ app.post('/webhook', async (req, res) => {
         if (d.facebook_lead_id) {
             userData.external_id = [crypto.createHash('sha256').update(d.facebook_lead_id).digest('hex')];
         }
-
         if (d.facebook_lead_id && !d.facebook_lead_id.startsWith('WEB-')) {
             userData.lead_id = d.facebook_lead_id;
         }
@@ -360,6 +355,14 @@ app.post('/webhook', async (req, res) => {
         console.log(`📤 Enviando '${facebookEventName}' (ID: ${uniqueEventId})...`);
         await axios.post(facebookAPIUrl, { data: [eventData] });
 
+        // === ATUALIZA O BANCO COM O NOVO STATUS (TRAVA 3) ===
+        console.log(`📝 Atualizando status no DB para: ${facebookEventName}`);
+        await pool.query(
+            "UPDATE leads SET last_sent_event = $1 WHERE facebook_lead_id = $2",
+            [facebookEventName, dbRow.facebook_lead_id]
+        );
+        // ====================================================
+
         console.log(`✅ SUCESSO!`);
         res.status(200).send('Enviado.');
 
@@ -370,49 +373,29 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ============================================================================
-// 4. ROTA DE BACKUP CSV (CORRIGIDA - SEM ERRO DE HEADERS)
+// 4. ROTA DE BACKUP CSV
 // ============================================================================
 app.get('/baixar-backup', async (req, res) => {
     const client = await pool.connect();
     try {
-        // 1. Buscamos TUDO do banco
         const queryText = `SELECT * FROM leads ORDER BY created_time DESC`;
         const result = await client.query(queryText);
         
-        if (result.rows.length === 0) {
-            // Se estiver vazio, liberamos aqui e respondemos
-            // O finally vai tentar liberar de novo, mas o pg-pool lida bem se tratarmos certinho
-            // Mas para evitar erro, deixamos o finally lidar com o release
-            return res.send('Banco vazio.');
-        }
+        if (result.rows.length === 0) return res.send('Banco vazio.');
 
-        // 2. Mapeamento de colunas
         const mapColumns = {
             'facebook_lead_id': 'id',
             'created_time': 'created_time',
-            'ad_id': 'ad_id',
-            'ad_name': 'ad_name',
-            'adset_id': 'adset_id',
-            'adset_name': 'adset_name',
-            'campaign_id': 'campaign_id',
-            'campaign_name': 'campaign_name',
-            'form_id': 'form_id',
-            'form_name': 'form_name',
-            'is_organic': 'is_organic',
-            'platform': 'platform',
-            'first_name': 'nome',
-            'last_name': 'sobrenome',
-            'phone': 'phone_number',
-            'email': 'email',
-            'city': 'city',
-            'estado': 'state',
-            'zip_code': 'cep',
-            'dob': 'data_de_nascimento',
+            'ad_id': 'ad_id', 'ad_name': 'ad_name',
+            'adset_id': 'adset_id', 'adset_name': 'adset_name',
+            'campaign_id': 'campaign_id', 'campaign_name': 'campaign_name',
+            'form_id': 'form_id', 'form_name': 'form_name',
+            'is_organic': 'is_organic', 'platform': 'platform',
+            'first_name': 'nome', 'last_name': 'sobrenome',
+            'phone': 'phone_number', 'email': 'email',
+            'city': 'city', 'estado': 'state', 'zip_code': 'cep',
             'lead_status': 'lead_status',
-            'fbc': 'fbc',
-            'fbp': 'fbp',
-            'client_ip_address': 'client_ip_address',
-            'client_user_agent': 'client_user_agent'
+            'last_sent_event': 'ultimo_evento_enviado' // Incluindo no backup
         };
 
         const dbKeys = Object.keys(mapColumns);
@@ -421,12 +404,9 @@ app.get('/baixar-backup', async (req, res) => {
         
         csvRows.push(csvHeaders.join(';')); 
 
-        // 3. Preenchimento das linhas
         for (const row of result.rows) {
             const values = dbKeys.map(key => {
                 let val = row[key];
-
-                // Conversão de Data
                 if (key === 'created_time' && val && !isNaN(val) && String(val).length > 5) {
                     try {
                         const dateObj = new Date(Number(val) * 1000); 
@@ -434,27 +414,18 @@ app.get('/baixar-backup', async (req, res) => {
                         val = dateObj.toISOString().replace('T', ' ').substring(0, 19);
                     } catch (e) { }
                 }
-
                 let escaped = ('' + (val || '')).replace(/"/g, '""');
-                
-                // Truque do Excel
                 if (key === 'facebook_lead_id' || key === 'phone' || key === 'ad_id' || key === 'zip_code') {
                     return `="${escaped}"`; 
                 }
-                
                 return `"${escaped}"`;
             });
             csvRows.push(values.join(';'));
         }
 
-        // 4. Envio Correto (TUDO JUNTO)
         res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-        res.setHeader('Content-Disposition', 'attachment; filename="backup_leads_completo.csv"');
-        
-        // CORREÇÃO AQUI: Concatenamos o BOM (\ufeff) direto no texto final
-        // Assim enviamos tudo de uma vez só e o erro de Headers some.
+        res.setHeader('Content-Disposition', 'attachment; filename="backup_leads_v822.csv"');
         const csvContent = '\ufeff' + csvRows.join('\n');
-        
         res.status(200).send(csvContent);
 
     } catch (error) {
@@ -470,8 +441,8 @@ app.get('/baixar-backup', async (req, res) => {
 // ============================================================================
 app.get('/importar', (req, res) => {
     res.send(`
-        <!DOCTYPE html><html><head><title>Importar Leads</title><style>body{font-family:sans-serif;text-align:center;margin-top:50px}textarea{width:90%;max-width:1200px;height:400px;margin-top:20px}button{padding:10px 20px;font-size:16px;cursor:pointer}</style></head>
-        <body><h1>Importar Leads</h1><p>Cole o JSON com colchetes: <b>[</b> { ... }, { ... } <b>]</b></p>
+        <!DOCTYPE html><html><head><title>Importar Leads V8.22</title><style>body{font-family:sans-serif;text-align:center;margin-top:50px}textarea{width:90%;max-width:1200px;height:400px;margin-top:20px}button{padding:10px 20px;font-size:16px;cursor:pointer}</style></head>
+        <body><h1>Importar Leads (V8.22)</h1><p>Cole o JSON com colchetes: <b>[</b> { ... }, { ... } <b>]</b></p>
         <textarea id="leads-data" placeholder='[{"id": "...", "created_time": "12/15/25", ...}]'></textarea><br><button onclick="importLeads()">Importar</button><p id="status-message"></p>
         <script>
             async function importLeads(){
@@ -550,7 +521,7 @@ app.post('/import-leads', async (req, res) => {
 // ============================================================================
 // 6. INICIALIZAÇÃO
 // ============================================================================
-app.get('/', (req, res) => res.send('🟢 Servidor V8.21 (Modo Paciência 15s) Online!'));
+app.get('/', (req, res) => res.send('🟢 Servidor V8.22 (Blindagem Tripla) Online!'));
 
 const startServer = async () => {
     try {
