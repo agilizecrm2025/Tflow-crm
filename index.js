@@ -335,11 +335,20 @@ app.post('/webhook', async (req, res) => {
         const uniqueEventId = `${dbRow.facebook_lead_id}_${facebookEventName}`;
         const eventTime = Math.floor(Date.now() / 1000);
         
+        // ====================================================================
+        // CORREÇÃO: Definição dinâmica do Action Source (Website vs System)
+        // ====================================================================
+        let currentActionSource = 'system_generated'; 
+        if (facebookEventName === 'Lead' || facebookEventName === 'CompleteRegistration') {
+            currentActionSource = 'website';
+        }
+        // ====================================================================
+
         const eventData = { 
             event_name: facebookEventName, 
             event_time: eventTime,
             event_id: uniqueEventId, 
-            action_source: 'website',
+            action_source: currentActionSource, // AGORA É DINÂMICO
             user_data: userData,
             custom_data: { 
                 event_source: 'crm',
@@ -352,7 +361,7 @@ app.post('/webhook', async (req, res) => {
 
         const facebookAPIUrl = `https://graph.facebook.com/v24.0/${PIXEL_ID}/events?access_token=${FB_ACCESS_TOKEN}`;
         
-        console.log(`📤 Enviando '${facebookEventName}' (ID: ${uniqueEventId})...`);
+        console.log(`📤 Enviando '${facebookEventName}' (ID: ${uniqueEventId}) como '${currentActionSource}'...`);
         await axios.post(facebookAPIUrl, { data: [eventData] });
 
         // === ATUALIZA O BANCO COM O NOVO STATUS (TRAVA 3) ===
